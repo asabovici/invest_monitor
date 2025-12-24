@@ -30,7 +30,8 @@ def collect(period):
 
 @cli.command()
 @click.argument('csv_path')  # We pass CSV path again to reconstruct the portfolio object for now
-def report(csv_path):
+@click.option('--output', default=None, help='Path to save the report (e.g., report.md)')
+def report(csv_path, output):
     """Generate risk and exposure reports."""
     db = Database()
     ingester = Ingester(db)
@@ -49,6 +50,10 @@ def report(csv_path):
             click.echo(tabulate(v, headers='keys', tablefmt='grid'))
         else:
             click.echo(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
+
+    if output:
+        engine.generate_report(portfolio, output)
+        click.echo(f"\nReport saved to {output}")
 
 if __name__ == '__main__':
     cli()
