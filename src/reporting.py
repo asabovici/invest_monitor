@@ -75,3 +75,31 @@ class ReportingEngine:
             "Monte Carlo VaR (95%)": mc_var,
             "Covariance Matrix": cov_matrix
         }
+
+    def generate_report(self, portfolio: Portfolio, output_path: str):
+        """Generates a Markdown report for the portfolio."""
+        exposure = self.get_portfolio_exposure(portfolio)
+        risk_metrics = self.get_portfolio_risk_metrics(portfolio)
+
+        with open(output_path, "w") as f:
+            f.write(f"# Portfolio Report: {portfolio.name}\n\n")
+
+            f.write("## Holdings\n")
+            f.write("| Ticker | Name | Type | Quantity | Cost Basis |\n")
+            f.write("|---|---|---|---|---|\n")
+            for pos in portfolio.positions:
+                f.write(f"| {pos.asset.ticker} | {pos.asset.name} | {pos.asset.asset_type.value} | {pos.quantity} | {pos.cost_basis} |\n")
+            f.write("\n")
+
+            f.write("## Exposure Analysis\n")
+            f.write(exposure.to_markdown())
+            f.write("\n\n")
+
+            f.write("## Risk Metrics\n")
+            for k, v in risk_metrics.items():
+                if k != "Covariance Matrix":
+                    f.write(f"- **{k}**: {v:.4f}\n")
+
+            f.write("\n### Covariance Matrix\n")
+            f.write(risk_metrics["Covariance Matrix"].to_markdown())
+            f.write("\n")

@@ -23,12 +23,7 @@ class Collector:
 
     def update_all_assets(self, period: str = "1mo"):
         """Updates prices for all assets currently in the database."""
-        # Simple implementation: get all unique tickers from assets table
-        import sqlite3
-        with sqlite3.connect(self.db.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT ticker FROM assets")
-            tickers = [row[0] for row in cursor.fetchall()]
+        tickers = self.db.get_all_tickers()
         
         if tickers:
             self.collect_prices(tickers, period=period)

@@ -1,8 +1,0 @@
-yfinance
-pandas
-numpy
-scipy
-pytest
-sqlalchemy
-click
-tabulate
