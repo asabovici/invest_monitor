@@ -1,5 +1,0 @@
-Ticker,Name,Type,Quantity,CostBasis,Currency,Sector,ConstituentTickers,ConstituentWeights
-AAPL,Apple Inc.,Stock,10,150.0,USD,Technology,,
-VTI,Vanguard Total Stock Market,ETF,5,200.0,USD,Diversified,AAPL,0.06
-MSFT,Microsoft Corp.,Stock,5,300.0,USD,Technology,,
-BTC-USD,Bitcoin,Crypto,0.1,40000.0,USD,Financial,,
