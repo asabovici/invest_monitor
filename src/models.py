@@ -40,4 +40,4 @@ class Portfolio:
     positions: List[Position] = field(default_factory=list)
 
     def total_cost(self) -> float:
-        return sum(p.quantity * p.cost_basis for p in p.positions)
+        return sum(p.quantity * p.cost_basis for p in self.positions)

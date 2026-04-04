@@ -4,4 +4,31 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "yfinance",
+    "pandas",
+    "numpy",
+    "scipy",
+    "pyarrow",
+    "click",
+    "tabulate",
+    "streamlit",
+    "plotly",
+    "duckdb",
+    "anthropic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+invest-monitor = "src.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

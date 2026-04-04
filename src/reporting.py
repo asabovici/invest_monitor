@@ -40,6 +40,14 @@ class ReportingEngine:
         returns = prices.pct_change().dropna()
         return returns
 
+    def calculate_cumulative_returns(self, tickers: List[str], start_date: str = None) -> pd.DataFrame:
+        """Returns cumulative price return series for each ticker, rebased to 0 at start."""
+        prices = self.db.get_historical_prices(tickers, start_date)
+        if prices.empty:
+            return pd.DataFrame()
+        first_valid = prices.apply(lambda col: col.dropna().iloc[0] if not col.dropna().empty else np.nan)
+        return prices.div(first_valid) - 1
+
     def calculate_historical_var(self, returns: pd.Series, confidence_level: float = 0.95) -> float:
         """Calculates Historical VaR for a single asset or portfolio returns stream."""
         return np.percentile(returns, (1 - confidence_level) * 100)
