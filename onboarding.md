@@ -6,10 +6,11 @@ Welcome. This document will get you from zero to making changes in the codebase.
 
 ## What this project does
 
-`invest_monitor` is a CLI tool for tracking an investment portfolio. You give it a CSV of your holdings, it fetches historical prices from Yahoo Finance, stores everything locally, and produces:
+`invest_monitor` is a personal investment portfolio monitoring tool. You give it a CSV of your holdings, it fetches historical prices from Yahoo Finance, stores everything locally, and produces:
 
-- **Exposure reports** — how much of your portfolio is in each asset type and sector
-- **Risk metrics** — volatility, Value-at-Risk (historical and Monte Carlo), covariance matrix
+- **Exposure reports** — how much of your portfolio is in each asset type and sector, with lookthrough into ETF/Fund holdings
+- **Risk metrics** — volatility, Value-at-Risk (historical and Monte Carlo), covariance matrix, drawdown
+- **AI agents** — conversational Claude-powered agents for risk, wealth, and research queries
 
 ---
 
@@ -21,42 +22,42 @@ Welcome. This document will get you from zero to making changes in the codebase.
 # Clone and enter the project
 cd invest_monitor
 
-# Create a virtual environment
-python -m venv .venv
-source .venv/bin/activate
+# Install dependencies (preferred)
+uv sync
 
-# Install dependencies
-pip install -r requirements.txt
+# Or with pip
+pip install -e .
 ```
 
 The data directory is created automatically at `data/` the first time you run any command. You don't need to set it up manually.
 
 > **Note:** Always run CLI commands from the project root. The data path is relative, so running from a different directory will create a new empty data store in the wrong place.
 
+Requires an `ANTHROPIC_API_KEY` environment variable to use any agent.
+
 ---
 
 ## Running the tool
 
-There are three CLI commands. Run them from the project root:
-
 ```bash
-# 1. Load a portfolio from CSV into the database
-python src/cli.py load portfolio.csv --name "My Portfolio"
+# Launch the Streamlit dashboard (primary interface)
+streamlit run src/app.py
 
-# 2. Fetch historical price data for all assets in the database
-python src/cli.py collect --period 1y
-
-# 3. Generate exposure + risk report
-python src/cli.py report portfolio.csv
+# CLI commands
+invest-monitor load portfolio.csv --name "My Portfolio"
+invest-monitor collect --period 1y
+invest-monitor report "My Portfolio"
+invest-monitor portfolio list
+invest-monitor agent --portfolio "My Portfolio"
+invest-monitor wealth --portfolio "My Portfolio"
+invest-monitor research --portfolio "My Portfolio"
 ```
 
-Typical workflow: `load` → `collect` → `report`. After the initial load and collect, you only need to re-run `collect` to refresh prices and `report` to see updated metrics.
+Typical workflow: `load` → `collect` → open dashboard or run agent.
 
 ---
 
 ## Portfolio CSV format
-
-The `load` and `report` commands expect a CSV with these columns:
 
 | Column | Required | Description |
 |--------|----------|-------------|
@@ -64,25 +65,16 @@ The `load` and `report` commands expect a CSV with these columns:
 | `Name` | Yes | Human-readable name |
 | `Type` | Yes | One of: `Stock`, `Bond`, `ETF`, `Fund`, `Cash`, `Crypto` |
 | `Quantity` | Yes | Number of units held |
-| `CostBasis` | Yes | Price paid per unit |
+| `CostBasis` | Yes | **Cost per share** (not total cost) |
 | `Currency` | No | Defaults to `USD` |
 | `Sector` | No | e.g. `Technology`, `Healthcare` |
-| `ConstituentTickers` | No | Comma-separated tickers for ETF/Fund look-through |
-| `ConstituentWeights` | No | Comma-separated weights matching `ConstituentTickers` |
 
 **Example:**
 
 ```csv
 Ticker,Name,Type,Quantity,CostBasis,Currency,Sector
 AAPL,Apple Inc,Stock,10,150.00,USD,Technology
-AGG,iShares Core US Aggregate Bond,ETF,5,100.00,USD,
-```
-
-**For an ETF with look-through:**
-
-```csv
-Ticker,Name,Type,Quantity,CostBasis,ConstituentTickers,ConstituentWeights
-SPY,S&P 500 ETF,ETF,2,400.00,"AAPL,MSFT,AMZN","0.07,0.06,0.03"
+ARTY,iShares Thematic ETF,ETF,50,25.00,USD,
 ```
 
 ---
@@ -91,59 +83,66 @@ SPY,S&P 500 ETF,ETF,2,400.00,"AAPL,MSFT,AMZN","0.07,0.06,0.03"
 
 ```
 src/
-├── cli.py           — Entry point. Three Click commands: load / collect / report
+├── app.py           — Streamlit dashboard (primary UI)
+├── cli.py           — Click CLI entry point
 ├── models.py        — Domain objects: Asset, Position, Portfolio, Constituent, AssetType
-├── collector.py     — Fetches prices from Yahoo Finance (yfinance), saves to DB
-├── reporting.py     — Calculates exposure and risk metrics from DB data
+├── collector.py     — Fetches prices from Yahoo Finance (yfinance)
+├── reporting.py     — Risk and exposure calculations
 ├── database/
-│   └── database.py  — Parquet store. Reads/writes assets, constituents, and per-ticker price files
-└── data/
-    └── ingestion.py — Parses portfolio CSV into domain objects, saves assets to DB
+│   └── database.py  — Parquet-backed data store
+├── data/
+│   └── ingestion.py — Portfolio CSV + ETF holdings CSV parsers
+└── agent/
+    ├── agent.py          — RiskAgent
+    ├── skills.py         — Risk agent tools
+    ├── wealth_agent.py   — WealthAgent
+    ├── wealth_skills.py  — Wealth agent tools
+    ├── research_agent.py — ResearchAgent
+    └── research_skills.py
 ```
 
 ---
 
 ## How the pieces connect
 
-### Loading a portfolio (`cli load`)
+### Loading a portfolio (`cli load` or dashboard upload)
 
 ```
-cli.py:load()
-  → Ingester.load_portfolio_from_csv()
-      reads CSV row by row
-      creates Asset + Constituent objects
-      calls Database.add_asset() for each
-      returns Portfolio with all Positions
+Ingester.load_portfolio_from_csv()
+    reads CSV row by row
+    creates Asset objects
+    calls Database.add_asset() for each
+    calls Database.save_portfolio()
+    returns Portfolio
 ```
 
-### Collecting prices (`cli collect`)
+### Collecting prices (dashboard or `cli collect`)
 
 ```
-cli.py:collect()
-  → Collector.update_all_assets()
-      queries all tickers from DB
-      calls yfinance.download() in batches
-      calls Database.save_prices() for each ticker
+Collector.update_all_assets()
+    queries all tickers from assets.parquet
+    calls yfinance.download() in batches
+    calls Database.save_prices() per ticker
 ```
 
-### Generating a report (`cli report`)
+### ETF lookthrough (`Ingester.parse_fund_holdings_csv()`)
 
 ```
-cli.py:report()
-  → Ingester.load_portfolio_from_csv()   (re-reads CSV)
-  → ReportingEngine.get_portfolio_exposure()
-      aggregates positions by AssetType + Sector
-      decomposes composite assets (ETFs/Funds) into constituents
-  → ReportingEngine.get_portfolio_risk_metrics()
-      Database.get_historical_prices()   (pivoted DataFrame)
-      computes daily returns (pct_change)
-      weights by quantity × cost_basis
-      calculates volatility, historical VaR, Monte Carlo VaR, covariance
+User uploads vendor holdings CSV in the Lookthrough tab
+    → Ingester.parse_fund_holdings_csv()
+        auto-detects header row (skips vendor metadata lines)
+        fuzzy-matches columns for ticker/name/weight/sector/asset class
+        normalises weights to fractions
+    → Database.save_fund_holdings(fund_ticker, as_of_date, df)
+        stored in fund_holdings.parquet keyed by (fund_ticker, as_of_date)
+
+Exposure tab reads Database.get_fund_holdings(ticker) for each ETF/Fund position
+    → disaggregates into underlying sector/type buckets in charts
 ```
 
 ---
 
-## Key concepts to know
+## Key concepts
 
 ### Domain model
 
@@ -152,79 +151,76 @@ Portfolio
   └── List[Position]
         ├── asset: Asset
         │     ├── ticker, name, asset_type, currency, sector
-        │     └── constituents: List[Constituent]  ← only for ETFs/Funds
+        │     └── constituents: List[Constituent]  ← legacy ETF look-through
         ├── quantity: float
-        └── cost_basis: float
+        └── cost_basis: float  ← ALWAYS per share, never total
 ```
-
-`Asset.is_composite()` returns `True` if the asset has constituents. The reporting engine uses this to do look-through — instead of treating an ETF as one holding, it breaks it down into its underlying tickers.
 
 ### Risk metrics
 
-- **Volatility** — annualized standard deviation of daily returns (multiplied by √252)
-- **Historical VaR (95%)** — the 5th percentile of observed daily returns; "on the worst 5% of days, you lose at least this much"
-- **Monte Carlo VaR (95%)** — same idea, but using 10,000 simulated days drawn from a normal distribution fitted to historical data
-- **Covariance matrix** — pairwise annualized covariances between assets; useful for understanding diversification
+- **Volatility** — annualized std dev of daily returns × √252
+- **Historical VaR (95%)** — 5th percentile of observed daily returns
+- **Monte Carlo VaR (95%)** — parametric: 10,000 samples from N(mean, std), take percentile
+- **Covariance matrix** — pairwise annualized covariances; useful for diversification analysis
 
 ---
 
 ## Data storage
 
-All data lives under `data/` as Parquet files:
+All data lives under `data/` as Parquet files (gitignored):
 
 ```
 data/
-├── assets.parquet             — one row per asset (ticker, name, asset_type, currency, sector)
-├── constituents.parquet       — one row per constituent (parent_ticker, constituent_ticker, weight)
+├── assets.parquet             — ticker, name, asset_type, currency, sector
+├── portfolios.parquet         — name, created_at
+├── positions.parquet          — portfolio_name, ticker, quantity, cost_basis (per share)
+├── constituents.parquet       — parent_ticker, constituent_ticker, weight (legacy)
+├── fund_holdings.parquet      — fund_ticker, as_of_date, holding_ticker, holding_name, weight, sector, asset_type
 └── prices/
-    ├── AAPL.parquet           — date-indexed price history for AAPL
-    ├── MSFT.parquet
-    └── ...
+    └── {TICKER}.parquet       — date-indexed daily close prices
 ```
 
-You can inspect any file with pandas:
+Inspect any file:
 
 ```python
 import pandas as pd
 pd.read_parquet("data/assets.parquet")
+pd.read_parquet("data/fund_holdings.parquet")
 pd.read_parquet("data/prices/AAPL.parquet").tail(10)
 ```
 
 ---
 
-## Making a change — worked examples
+## Streamlit dashboard tabs
 
-### Add a new risk metric (e.g. Sharpe ratio)
+The dashboard has two views (sidebar radio: Single Portfolio / Multi-Portfolio Dashboard).
 
-1. Open `src/reporting.py`
-2. Add a method to `ReportingEngine`:
-   ```python
-   def calculate_sharpe(self, returns: pd.DataFrame, risk_free_rate: float = 0.0) -> pd.Series:
-       excess = returns.mean() - risk_free_rate / 252
-       return (excess / returns.std()) * (252 ** 0.5)
-   ```
-3. Call it inside `get_portfolio_risk_metrics()` and add the result to the returned dict
-4. Print it in `cli.py:report()` alongside the existing metrics
+**Single Portfolio tabs:**
 
-### Add a new column to the CSV (e.g. `Country`)
+| Tab | Contents |
+|-----|----------|
+| Overview | Position table with P&L, allocation donut |
+| Price History | Normalised prices, cumulative returns, daily returns |
+| Exposure | Asset-type pie, sector bar — ETF/Fund positions disaggregated via fund_holdings if uploaded |
+| Risk | Volatility, VaR, correlation heatmap, return distribution, covariance matrix |
+| Positions | Editable position table, add new positions |
+| Security Master | Edit asset metadata (name, type, sector, currency) |
+| Trades | Record BUY/SELL trades, view trade history |
+| Lookthrough | Upload ETF/fund holdings CSVs, view snapshots, sector breakdown, portfolio contribution table |
 
-1. Add `country: Optional[str] = None` to the `Asset` dataclass in `src/models.py`
-2. In `src/database/database.py`, add `"country": asset.country` to the `new_row` dict inside `add_asset()`
-3. In `src/data/ingestion.py`, read `row.get('Country')` and pass it when constructing the `Asset`
-4. Delete `data/assets.parquet` so it is recreated with the new column on next `load`
-
-### Add a new CLI command
-
-1. Open `src/cli.py`
-2. Add a new function decorated with `@cli.command()` and `@click.argument` / `@click.option` as needed
-3. Wire it to the appropriate service class (`ReportingEngine`, `Collector`, etc.)
+**Multi-Portfolio Dashboard:**
+- Summary table across all portfolios (returns, vol, VaR, drawdown)
+- Returns, risk, and drawdown comparison charts
+- Wealth Projection with configurable growth assumptions
 
 ---
 
 ## Things to watch out for
 
-- **Run from the project root.** The data path is relative — running from `src/` will silently create a new empty `data/` in the wrong place.
-- **`Type` column must match exactly.** Values like `"stock"` (lowercase) or `"Equity"` will fail; use `Stock`, `Bond`, `ETF`, `Fund`, `Cash`, `Crypto`.
-- **`collect` before `report`.** The report reads prices from Parquet. If you haven't collected data, risk metrics will be empty or error.
-- **Adding a column to `assets.parquet` requires deleting the file.** Parquet files have a fixed schema — if you add a field to `Asset` and re-run `load`, old rows won't have that column. Delete `data/assets.parquet` to let it be recreated cleanly.
-- **Tests live in `tests/`.** Run with `PYTHONPATH=. .venv/bin/python -m pytest tests/ -v`.
+- **`cost_basis` is per share**, not total. `Portfolio.total_cost()` = Σ (quantity × cost_basis). Storing total cost causes double-multiplication.
+- **`Type` column must match AssetType enum exactly**: `Stock`, `Bond`, `ETF`, `Fund`, `Cash`, `Crypto` — not `stock`, `Equity`, etc.
+- **`collect` before `report`/agent** — risk metrics need price data in the DB.
+- **`portfolios.parquet` and `positions.parquet` must stay in sync** — writing one without the other leaves the portfolio invisible to `portfolio list`.
+- **Adding a column to a parquet file requires deleting it first** — parquet has a fixed schema; old rows won't have new columns. Delete the file and re-run `load` to recreate cleanly.
+- **Run from project root** — `data/` path is relative; running from `src/` creates a new empty store in the wrong place.
+- **String columns with all-NaN values** — pandas infers dtype as `float64`, which breaks Streamlit's `TextColumn` config. The DB layer casts `name`, `sector`, `currency` to `str` on read via `get_all_assets()`. Do the same for any new string columns added to parquet files.

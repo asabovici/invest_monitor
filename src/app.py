@@ -422,9 +422,9 @@ portfolio: Portfolio = st.session_state["portfolio"]
 tickers = [pos.asset.ticker for pos in portfolio.positions]
 reporting = get_reporting()
 
-tab_overview, tab_prices, tab_exposure, tab_risk, tab_positions, tab_security, tab_trades = st.tabs([
+tab_overview, tab_prices, tab_exposure, tab_risk, tab_positions, tab_security, tab_trades, tab_lookthrough = st.tabs([
     "📊 Overview", "📈 Price History", "🥧 Exposure", "⚠️ Risk",
-    "✏️ Positions", "🏢 Security Master", "📋 Trades",
+    "✏️ Positions", "🏢 Security Master", "📋 Trades", "🔍 Lookthrough",
 ])
 
 # ── Overview ──────────────────────────────────────────────────────────────────
@@ -562,6 +562,7 @@ with tab_prices:
 
 with tab_exposure:
     st.header("Portfolio Exposure")
+    db = get_db()
 
     try:
         exposure_df = reporting.get_portfolio_exposure(portfolio).reset_index()
@@ -572,15 +573,25 @@ with tab_exposure:
             for pos in portfolio.positions:
                 cp = cur_prices.get(pos.asset.ticker)
                 value_map[pos.asset.ticker] = pos.quantity * (cp if cp is not None else pos.cost_basis)
-            # Rebuild with current values
+            # Rebuild with current values, applying lookthrough for ETF/Fund positions
             rows_exp = []
             for pos in portfolio.positions:
                 base = value_map[pos.asset.ticker]
-                if pos.asset.is_composite():
+                is_fund = pos.asset.asset_type in (AssetType.ETF, AssetType.FUND)
+                holdings = db.get_fund_holdings(pos.asset.ticker) if is_fund else pd.DataFrame()
+                if is_fund and not holdings.empty:
+                    for _, h in holdings.iterrows():
+                        rows_exp.append({
+                            "Type": h["asset_type"] or "Lookthrough",
+                            "Sector": h["sector"] or "Unknown",
+                            "Value": h["weight"] * base,
+                            "Via": pos.asset.ticker,
+                        })
+                elif pos.asset.is_composite():
                     for c in pos.asset.constituents:
-                        rows_exp.append({"Type": "Constituent", "Sector": "Look-through", "Value": c.weight * base})
+                        rows_exp.append({"Type": "Constituent", "Sector": "Look-through", "Value": c.weight * base, "Via": pos.asset.ticker})
                 else:
-                    rows_exp.append({"Type": pos.asset.asset_type.value, "Sector": pos.asset.sector or "Unknown", "Value": base})
+                    rows_exp.append({"Type": pos.asset.asset_type.value, "Sector": pos.asset.sector or "Unknown", "Value": base, "Via": ""})
             exposure_df = pd.DataFrame(rows_exp).groupby(["Type", "Sector"])["Value"].sum().reset_index()
         else:
             exposure_df = exposure_df.rename(columns={"Weight": "Value"})
@@ -713,6 +724,9 @@ with tab_positions:
     pos_df = pd.DataFrame(pos_rows) if pos_rows else pd.DataFrame(
         columns=["Delete", "Ticker", "Name", "Type", "Sector", "Quantity", "Cost Basis (per share)"]
     )
+    for col in ("Ticker", "Name", "Type", "Sector"):
+        if col in pos_df.columns:
+            pos_df[col] = pos_df[col].fillna("").astype(str)
 
     edited_pos = st.data_editor(
         pos_df,
@@ -945,3 +959,171 @@ with tab_trades:
             "notional": "Notional",
         })[["ID", "Date", "Portfolio", "Ticker", "Side", "Quantity", "Price", "Notional"]]
         st.dataframe(display_trades, use_container_width=True, hide_index=True)
+
+# ── Lookthrough ───────────────────────────────────────────────────────────────
+
+with tab_lookthrough:
+    st.header("ETF / Fund Lookthrough")
+    st.caption(
+        "Upload monthly holdings files from an ETF or fund vendor (iShares, Vanguard, etc.) "
+        "to see the underlying exposure for any fund position in this portfolio."
+    )
+
+    db = get_db()
+
+    # Only show ETF/Fund positions from the active portfolio
+    fund_positions = [
+        pos for pos in portfolio.positions
+        if pos.asset.asset_type in (AssetType.ETF, AssetType.FUND)
+    ]
+
+    if not fund_positions:
+        st.info("No ETF or Fund positions found in this portfolio. Add one in the Positions tab first.")
+        st.stop()
+
+    fund_tickers = [pos.asset.ticker for pos in fund_positions]
+    selected_fund = st.selectbox(
+        "Select fund / ETF",
+        fund_tickers,
+        format_func=lambda t: f"{t} — {next(p.asset.name for p in fund_positions if p.asset.ticker == t)}",
+    )
+
+    st.markdown("---")
+
+    col_upload, col_snapshots = st.columns([1, 1])
+
+    with col_upload:
+        st.subheader("Upload Holdings Snapshot")
+        uploaded_holdings = st.file_uploader(
+            "Holdings CSV from the fund vendor",
+            type=["csv"],
+            key="holdings_upload",
+        )
+        snap_date = st.date_input(
+            "As-of date (e.g. end of month)",
+            value=pd.Timestamp.today().date(),
+            key="snap_date",
+        )
+        if st.button("Import Holdings", type="primary", disabled=uploaded_holdings is None):
+            try:
+                ingester = Ingester(db)
+                holdings_df = ingester.parse_fund_holdings_csv(
+                    uploaded_holdings.getbuffer().tobytes(),
+                    selected_fund,
+                )
+                db.save_fund_holdings(selected_fund, str(snap_date), holdings_df)
+                st.success(
+                    f"Imported {len(holdings_df)} holdings for {selected_fund} "
+                    f"as of {snap_date}."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Failed to parse holdings file: {exc}")
+
+        with st.expander("Expected CSV format"):
+            st.markdown("""
+The parser auto-detects common vendor layouts. It looks for columns matching:
+
+| Logical field | Common column names |
+|---|---|
+| Ticker/symbol | `Ticker`, `Symbol`, `ISIN`, `SEDOL` |
+| Name | `Name`, `Holding`, `Description`, `Security` |
+| Weight | `Weight (%)`, `% of fund`, `Weighting`, `Allocation` |
+| Sector | `Sector`, `Industry`, `GICS Sector` |
+| Asset type | `Asset Class`, `Type`, `Instrument` |
+
+iShares and Vanguard formats are detected automatically, including their metadata header rows.
+""")
+
+    with col_snapshots:
+        st.subheader("Saved Snapshots")
+        dates = db.list_fund_holdings_dates(selected_fund)
+        if not dates:
+            st.info("No snapshots yet — upload a holdings file.")
+        else:
+            snap_df = pd.DataFrame({"Date": dates})
+            st.dataframe(snap_df, use_container_width=True, hide_index=True)
+
+            del_date = st.selectbox("Delete snapshot", dates, key="del_snap_date")
+            if st.button("Delete", type="secondary", key="del_snap_btn"):
+                db.delete_fund_holdings(selected_fund, del_date)
+                st.success(f"Deleted {selected_fund} snapshot for {del_date}.")
+                st.rerun()
+
+    st.markdown("---")
+
+    # ── View holdings ─────────────────────────────────────────────────────────
+    dates = db.list_fund_holdings_dates(selected_fund)
+    if dates:
+        st.subheader(f"Holdings — {selected_fund}")
+
+        view_date = st.selectbox("Snapshot date", dates, key="view_snap_date")
+        holdings = db.get_fund_holdings(selected_fund, view_date)
+
+        if holdings.empty:
+            st.info("No holdings data for this snapshot.")
+        else:
+            # ── Summary metrics ───────────────────────────────────────────────
+            coverage = holdings["weight"].sum()
+            n_holdings = len(holdings)
+            top5_weight = holdings.nlargest(5, "weight")["weight"].sum()
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("# Holdings", n_holdings)
+            m2.metric("Weight Coverage", f"{coverage * 100:.1f}%")
+            m3.metric("Top-5 Concentration", f"{top5_weight * 100:.1f}%")
+
+            # ── Sector chart ──────────────────────────────────────────────────
+            has_sector = holdings["sector"].ne("").any()
+            if has_sector:
+                sector_agg = (
+                    holdings.groupby("sector")["weight"].sum()
+                    .reset_index()
+                    .sort_values("weight", ascending=True)
+                )
+                fig_sector = px.bar(
+                    sector_agg, x="weight", y="sector", orientation="h",
+                    title="Sector Breakdown",
+                    labels={"weight": "Portfolio Weight", "sector": ""},
+                )
+                fig_sector.update_layout(xaxis_tickformat=".1%", yaxis_title="")
+                st.plotly_chart(fig_sector, use_container_width=True)
+
+            # ── Holdings table ────────────────────────────────────────────────
+            disp = holdings.copy()
+            disp["weight"] = disp["weight"].map(lambda x: f"{x * 100:.3f}%")
+            disp = disp.rename(columns={
+                "holding_ticker": "Ticker",
+                "holding_name": "Name",
+                "weight": "Weight",
+                "sector": "Sector",
+                "asset_type": "Asset Class",
+            })
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+
+            # ── Lookthrough contribution to portfolio ─────────────────────────
+            st.markdown("---")
+            st.subheader("Lookthrough — Portfolio Contribution")
+
+            pos = next(p for p in portfolio.positions if p.asset.ticker == selected_fund)
+            cp = cur_prices.get(selected_fund)
+            fund_value = pos.quantity * (cp if cp is not None else pos.cost_basis)
+
+            contrib = holdings.copy()
+            contrib["value"] = contrib["weight"] * fund_value
+            total_port_cost = sum(p.quantity * p.cost_basis for p in portfolio.positions)
+            contrib["port_weight"] = contrib["value"] / total_port_cost * 100
+
+            disp2 = contrib[["holding_ticker", "holding_name", "weight", "value", "port_weight", "sector"]].copy()
+            disp2["weight"] = disp2["weight"].map(lambda x: f"{x * 100:.3f}%")
+            disp2["value"] = disp2["value"].map(lambda x: f"${x:,.0f}")
+            disp2["port_weight"] = disp2["port_weight"].map(lambda x: f"{x:.3f}%")
+            disp2 = disp2.rename(columns={
+                "holding_ticker": "Ticker",
+                "holding_name": "Name",
+                "weight": "Fund Weight",
+                "value": "Est. Value",
+                "port_weight": "% of Portfolio",
+                "sector": "Sector",
+            })
+            st.dataframe(disp2, use_container_width=True, hide_index=True)

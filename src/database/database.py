@@ -9,6 +9,7 @@ CONSTITUENTS_FILE = "constituents.parquet"
 PORTFOLIOS_FILE = "portfolios.parquet"
 POSITIONS_FILE = "positions.parquet"
 TRADES_FILE = "trades.parquet"
+FUND_HOLDINGS_FILE = "fund_holdings.parquet"
 PRICES_DIR = "prices"
 
 
@@ -26,6 +27,7 @@ class Database:
             self._portfolios_path(): ["name", "created_at"],
             self._positions_path(): ["portfolio_name", "ticker", "quantity", "cost_basis"],
             self._trades_path(): ["trade_id", "portfolio_name", "ticker", "side", "quantity", "trade_price", "trade_date"],
+            self._fund_holdings_path(): ["fund_ticker", "as_of_date", "holding_ticker", "holding_name", "weight", "sector", "asset_type"],
         }
         for path, columns in defaults.items():
             if not os.path.exists(path):
@@ -47,6 +49,9 @@ class Database:
 
     def _trades_path(self) -> str:
         return os.path.join(self.data_dir, TRADES_FILE)
+
+    def _fund_holdings_path(self) -> str:
+        return os.path.join(self.data_dir, FUND_HOLDINGS_FILE)
 
     def _prices_path(self, ticker: str) -> str:
         return os.path.join(self.data_dir, PRICES_DIR, f"{ticker}.parquet")
@@ -259,7 +264,11 @@ class Database:
 
     def get_all_assets(self) -> pd.DataFrame:
         """Return the full assets table."""
-        return pd.read_parquet(self._assets_path())
+        df = pd.read_parquet(self._assets_path())
+        for col in ("name", "sector", "currency"):
+            if col in df.columns:
+                df[col] = df[col].fillna("").astype(str)
+        return df
 
     def update_assets_direct(self, assets_df: pd.DataFrame) -> None:
         """Overwrite the assets table with the supplied DataFrame."""
@@ -284,6 +293,50 @@ class Database:
         else:
             new_df.sort_index(inplace=True)
             new_df.to_parquet(prices_path)
+
+    # ── Fund holdings (lookthrough) ────────────────────────────────────────────
+
+    def save_fund_holdings(self, fund_ticker: str, as_of_date: str, holdings: pd.DataFrame) -> None:
+        """Store a holdings snapshot for a fund/ETF.
+
+        holdings must have columns: holding_ticker, holding_name, weight, sector, asset_type.
+        Replaces any existing snapshot for the same (fund_ticker, as_of_date).
+        """
+        df = pd.read_parquet(self._fund_holdings_path())
+        df = df[~((df["fund_ticker"] == fund_ticker) & (df["as_of_date"] == as_of_date))]
+        new_rows = holdings.copy()
+        new_rows["fund_ticker"] = fund_ticker
+        new_rows["as_of_date"] = as_of_date
+        new_rows = new_rows[["fund_ticker", "as_of_date", "holding_ticker", "holding_name", "weight", "sector", "asset_type"]]
+        pd.concat([df, new_rows], ignore_index=True).to_parquet(self._fund_holdings_path(), index=False)
+
+    def get_fund_holdings(self, fund_ticker: str, as_of_date: Optional[str] = None) -> pd.DataFrame:
+        """Return holdings for a fund.  If as_of_date is None, returns the latest snapshot."""
+        df = pd.read_parquet(self._fund_holdings_path())
+        df = df[df["fund_ticker"] == fund_ticker]
+        if df.empty:
+            return df
+        if as_of_date is None:
+            as_of_date = df["as_of_date"].max()
+        return df[df["as_of_date"] == as_of_date].reset_index(drop=True)
+
+    def list_fund_holdings_dates(self, fund_ticker: str) -> List[str]:
+        """Return all snapshot dates for a fund, newest first."""
+        df = pd.read_parquet(self._fund_holdings_path())
+        dates = df[df["fund_ticker"] == fund_ticker]["as_of_date"].unique().tolist()
+        return sorted(dates, reverse=True)
+
+    def delete_fund_holdings(self, fund_ticker: str, as_of_date: str) -> None:
+        """Remove a specific holdings snapshot."""
+        df = pd.read_parquet(self._fund_holdings_path())
+        df[~((df["fund_ticker"] == fund_ticker) & (df["as_of_date"] == as_of_date))].to_parquet(
+            self._fund_holdings_path(), index=False
+        )
+
+    def list_funds_with_holdings(self) -> List[str]:
+        """Return all fund tickers that have at least one holdings snapshot."""
+        df = pd.read_parquet(self._fund_holdings_path())
+        return df["fund_ticker"].unique().tolist()
 
     def get_historical_prices(self, tickers: List[str], start_date: Optional[str] = None) -> pd.DataFrame:
         frames = {}

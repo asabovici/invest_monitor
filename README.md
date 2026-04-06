@@ -1,41 +1,47 @@
 # Invest Monitor
 
-A personal investment portfolio monitoring tool with risk analytics, a Streamlit dashboard, and a Claude-powered risk management agent.
+A personal investment portfolio monitoring tool with risk analytics, ETF lookthrough, a Streamlit dashboard, and three Claude-powered agents.
 
 ## Features
 
 - **Portfolio tracking** — load and manage multiple portfolios stored as Parquet files
 - **Price collection** — fetch historical pricing via yfinance
+- **ETF / Fund lookthrough** — upload monthly holdings files from any vendor (iShares, Vanguard, etc.) to disaggregate ETF positions into underlying sector and asset-type exposure
 - **Risk analytics** — annualised volatility, historical and Monte Carlo VaR, covariance/correlation matrices, max drawdown
-- **Exposure reporting** — breakdown by asset type and sector
+- **Exposure reporting** — breakdown by asset type and sector, with automatic lookthrough for funds that have holdings uploaded
 - **Stress testing** — apply named historical scenarios (2008, COVID, dot-com, rate hikes, inflation) or custom shocks
 - **Monte Carlo simulation** — forward simulation of portfolio value with percentile outcomes
-- **Streamlit dashboard** — interactive UI with overview, price history, exposure, and risk tabs
-- **AI agent** — conversational risk analyst powered by Claude Opus 4.6 with adaptive thinking
+- **Streamlit dashboard** — interactive UI across eight tabs per portfolio plus a multi-portfolio dashboard
+- **AI agents** — three conversational agents powered by Claude Opus 4.6: risk analyst, wealth planner, and research / capital deployment
 
 ## Project Structure
 
 ```
 invest_monitor/
 ├── src/
-│   ├── models.py          # Data models: Asset, Position, Portfolio, AssetType
+│   ├── models.py          # Data models: Asset, Position, Portfolio, AssetType, Constituent
 │   ├── database/
-│   │   └── database.py    # Parquet-backed data store (assets, portfolios, positions, prices)
+│   │   └── database.py    # Parquet-backed data store
 │   ├── data/
-│   │   └── ingestion.py   # CSV ingestion into the database
+│   │   └── ingestion.py   # Portfolio CSV + ETF holdings CSV parsers
 │   ├── collector.py       # yfinance price fetcher
 │   ├── reporting.py       # Risk and exposure calculations
 │   ├── agent/
-│   │   ├── agent.py       # RiskAgent: multi-turn Claude conversation loop
-│   │   └── skills.py      # Tool-decorated risk skills exposed to the agent
+│   │   ├── agent.py           # RiskAgent
+│   │   ├── skills.py          # Risk agent tools (13 skills)
+│   │   ├── wealth_agent.py    # WealthAgent
+│   │   ├── wealth_skills.py   # Wealth agent tools (9 skills)
+│   │   ├── research_agent.py  # ResearchAgent
+│   │   └── research_skills.py # Research tools + server-side web search
 │   ├── app.py             # Streamlit dashboard
 │   └── cli.py             # Click CLI entry point
-└── data/
-    ├── securities.parquet # Security master (ticker, CUSIP, name, asset type, exchange)
-    ├── assets.parquet     # Asset metadata used by the database layer
-    ├── portfolios.parquet # Portfolio registry
-    ├── positions.parquet  # Holdings (portfolio, ticker, quantity, cost basis)
-    └── prices/            # Per-ticker historical price parquet files
+└── data/                  # gitignored
+    ├── assets.parquet
+    ├── portfolios.parquet
+    ├── positions.parquet
+    ├── constituents.parquet
+    ├── fund_holdings.parquet
+    └── prices/
 ```
 
 ## Setup
@@ -48,7 +54,7 @@ uv sync
 pip install -e .
 ```
 
-Requires an `ANTHROPIC_API_KEY` environment variable to use the agent.
+Requires an `ANTHROPIC_API_KEY` environment variable to use any agent.
 
 ## CLI Usage
 
@@ -56,7 +62,7 @@ Requires an `ANTHROPIC_API_KEY` environment variable to use the agent.
 # Load a portfolio from CSV
 invest-monitor load path/to/portfolio.csv --name "My Portfolio"
 
-# Fetch historical prices (all assets or a specific portfolio)
+# Fetch historical prices
 invest-monitor collect --period 1y
 invest-monitor collect --period 1y --portfolio "My Portfolio"
 
@@ -67,10 +73,11 @@ invest-monitor report "My Portfolio"
 invest-monitor portfolio list
 invest-monitor portfolio delete "My Portfolio"
 
-# Launch the AI risk agent (interactive)
-invest-monitor agent
+# Launch agents (interactive or one-shot)
 invest-monitor agent --portfolio "My Portfolio"
 invest-monitor agent --query "Which portfolio has the highest VaR?"
+invest-monitor wealth --portfolio "My Portfolio"
+invest-monitor research --portfolio "My Portfolio" --query "Deploy $100k without increasing tech exposure"
 ```
 
 ## Streamlit Dashboard
@@ -79,18 +86,27 @@ invest-monitor agent --query "Which portfolio has the highest VaR?"
 streamlit run src/app.py
 ```
 
-The dashboard provides four tabs:
+Two views selectable from the sidebar:
+
+**Single Portfolio** (eight tabs):
 
 | Tab | Contents |
 |-----|----------|
-| Overview | Position table with current prices, P&L, and asset-type allocation chart |
-| Price History | Normalised price chart and daily returns bar chart |
-| Exposure | Asset-type and sector breakdown (pie + bar charts) |
+| Overview | Position table with current prices, P&L, and allocation donut |
+| Price History | Normalised price chart, cumulative returns, daily returns |
+| Exposure | Asset-type pie + sector bar; ETF/Fund positions disaggregated via uploaded holdings |
 | Risk | Volatility, VaR, correlation heatmap, return distribution, covariance matrix |
+| Positions | Editable position table; add new positions |
+| Security Master | Edit asset metadata (name, type, sector, currency) |
+| Trades | Record BUY/SELL trades; view trade history |
+| Lookthrough | Upload ETF/fund holdings CSVs, view snapshots, sector breakdown, portfolio contribution |
+
+**Multi-Portfolio Dashboard:**
+- Summary table across all portfolios (1M/3M/6M/1Y returns, vol, VaR, drawdown)
+- Returns, risk, and drawdown comparison charts
+- Wealth Projection with configurable growth assumptions per asset class
 
 ## Portfolio CSV Format
-
-When importing via the CLI or dashboard upload:
 
 | Column | Required | Description |
 |--------|----------|-------------|
@@ -98,39 +114,34 @@ When importing via the CLI or dashboard upload:
 | Name | Yes | Human-readable name |
 | Type | Yes | `Stock`, `Bond`, `ETF`, `Fund`, `Cash`, `Crypto` |
 | Quantity | Yes | Number of units held |
-| CostBasis | Yes | Cost basis per unit |
+| CostBasis | Yes | Cost basis **per share** (not total) |
 | Currency | No | Defaults to `USD` |
 | Sector | No | Sector classification |
 
+## ETF / Fund Lookthrough
+
+Upload a monthly holdings file from your ETF vendor in the **Lookthrough** tab. The parser auto-detects common formats including iShares and Vanguard (handles metadata header rows). It fuzzy-matches columns for ticker, name, weight, sector, and asset class.
+
+Once uploaded, the **Exposure** tab automatically disaggregates that ETF/Fund position into its underlying sectors and asset types across all charts and tables.
+
+**Supported weight formats:** `7.0` (percent) and `0.07` (fraction) are both handled — the parser detects which by checking whether the column sums to > 1.5.
+
 ## Data Layer
 
-All data is stored as Parquet files under `data/`:
+All data stored as Parquet files under `data/` (gitignored):
 
-- **`securities.parquet`** — security master with CUSIP, exchange, and asset type for all known instruments
-- **`assets.parquet`** — asset metadata consumed by the database layer
-- **`portfolios.parquet`** — portfolio registry with creation timestamps
-- **`positions.parquet`** — flat holdings table: `portfolio_name`, `ticker`, `quantity`, `cost_basis`
-- **`prices/<TICKER>.parquet`** — per-ticker daily closing prices indexed by date
+| File | Description |
+|------|-------------|
+| `assets.parquet` | Asset metadata: ticker, name, asset_type, currency, sector |
+| `portfolios.parquet` | Portfolio registry with creation timestamps |
+| `positions.parquet` | Holdings: portfolio_name, ticker, quantity, cost_basis (per share) |
+| `constituents.parquet` | Legacy inline ETF look-through: parent_ticker, constituent_ticker, weight |
+| `fund_holdings.parquet` | Monthly ETF/fund holdings snapshots: fund_ticker, as_of_date, holding_ticker, holding_name, weight, sector, asset_type |
+| `prices/<TICKER>.parquet` | Per-ticker daily closing prices indexed by date |
 
 ## AI Agent Skills
 
-The risk agent has access to the following tools:
-
-| Skill | Description |
-|-------|-------------|
-| `list_portfolios` | List all portfolios in the database |
-| `get_portfolio_summary` | Full position breakdown with weights |
-| `get_risk_metrics` | Volatility, historical VaR, Monte Carlo VaR |
-| `get_exposure_breakdown` | Exposure by asset type and sector |
-| `check_concentration_risk` | Flag positions above a weight threshold |
-| `get_correlation_matrix` | Pairwise correlations with high-correlation alerts |
-| `calculate_max_drawdown` | Peak-to-trough drawdown per asset and portfolio |
-| `get_price_performance` | Returns over 1M, 3M, 6M, and 1Y look-back periods |
-| `get_cumulative_returns` | Total cumulative price return per asset from start of history (or a given date) |
-| `list_stress_scenarios` | Show available named historical scenarios |
-| `run_stress_test` | Apply a named scenario and estimate P&L impact |
-| `apply_custom_shock` | Apply arbitrary shocks by ticker, sector, or asset type |
-| `simulate_forward` | Monte Carlo forward simulation with percentile outcomes |
+See [AGENTS.md](AGENTS.md) for the full skill reference across all three agents.
 
 ## Asset Types
 
