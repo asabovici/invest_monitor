@@ -1,6 +1,7 @@
 import click
 from tabulate import tabulate
 
+from src import env as _env  # noqa: F401  — loads .env into os.environ
 from src.database import Database
 from src.collector import Collector
 from src.data.ingestion import Ingester
@@ -56,6 +57,18 @@ def portfolio_list():
             click.echo(f"  {name}")
 
 
+@portfolio.command("create")
+@click.argument("name")
+def portfolio_create(name):
+    """Create an empty portfolio. Add positions later via trades or CSV."""
+    from src.models import Portfolio
+    db = Database()
+    if name in db.list_portfolios():
+        raise click.ClickException(f"Portfolio '{name}' already exists.")
+    db.save_portfolio(Portfolio(name=name, positions=[]))
+    click.echo(f"Created empty portfolio '{name}'.")
+
+
 @portfolio.command("delete")
 @click.argument("name")
 def portfolio_delete(name):
@@ -63,6 +76,127 @@ def portfolio_delete(name):
     db = Database()
     db.delete_portfolio(name)
     click.echo(f"Deleted portfolio '{name}'.")
+
+
+@cli.group()
+def demo():
+    """Manage the demo dataset in data_demo/ (separate from live data/)."""
+    pass
+
+
+@demo.command("seed")
+@click.option("--reset", is_flag=True, help="Wipe data_demo/ before seeding.")
+def demo_seed(reset):
+    """Populate data_demo/ with sample portfolios for screen-sharing."""
+    from src import demo as demo_data
+    if reset:
+        demo_data.reset()
+    db = demo_data.seed()
+    click.echo(f"Seeded {demo_data.DEMO_DATA_DIR}/ → portfolios: {db.list_portfolios()}")
+
+
+@demo.command("reset")
+def demo_reset():
+    """Delete the data_demo/ directory entirely."""
+    from src import demo as demo_data
+    demo_data.reset()
+    click.echo(f"Removed {demo_data.DEMO_DATA_DIR}/.")
+
+
+@cli.group()
+def metrics():
+    """Compute & persist daily returns / risk / attribution time series."""
+    pass
+
+
+@cli.group()
+def production():
+    """Run / monitor the scheduled analytics-production jobs."""
+    pass
+
+
+@production.command("status")
+def production_status():
+    """Show each job's last run, status, and whether it's due."""
+    import pandas as pd
+    from src.production import JobRunner
+    runner = JobRunner(Database())
+    jobs = runner.db.get_production_jobs().sort_values("job_name")
+    now = pd.Timestamp.now()
+    rows = []
+    for _, r in jobs.iterrows():
+        last_run = r["last_run_at"]
+        rows.append({
+            "job":         r["job_name"],
+            "enabled":     "yes" if bool(r["enabled"]) else "no",
+            "interval_h":  round(int(r["interval_minutes"]) / 60, 1),
+            "last_run":    last_run.strftime("%Y-%m-%d %H:%M") if pd.notna(last_run) else "—",
+            "last_status": r["last_status"] or "—",
+            "due":         "yes" if runner.is_due(r, now=now) else "no",
+        })
+    click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@production.command("run")
+def production_run():
+    """Run every job that's currently due. Cron-friendly one-shot."""
+    from src.production import JobRunner
+    runner = JobRunner(Database())
+    results = runner.run_due_jobs()
+    if not results:
+        click.echo("No jobs were due.")
+        return
+    for r in results:
+        click.echo(f"[{r['status']:7}] {r['job_name']:24}  {r.get('duration_seconds', 0):.2f}s"
+                   + (f"  — {r.get('error')}" if r['status'] == 'error' else ""))
+
+
+@production.command("run-now")
+@click.argument("job_name")
+def production_run_now(job_name):
+    """Force-run one job ignoring schedule + enabled flag."""
+    from src.production import JobRunner, JOB_REGISTRY
+    if job_name not in JOB_REGISTRY:
+        raise click.ClickException(
+            f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
+        )
+    runner = JobRunner(Database())
+    r = runner.run_job(job_name, force=True)
+    click.echo(
+        f"[{r['status']}] {job_name}  {r.get('duration_seconds', 0):.2f}s"
+        + (f"\n{r.get('error')}" if r['status'] == 'error' else "")
+    )
+
+
+@production.command("daemon")
+@click.option("--check-every", default=60, type=int,
+              help="Seconds between schedule checks (default 60).")
+def production_daemon(check_every):
+    """Long-running loop: check the schedule every N seconds and run due jobs."""
+    from src.production import JobRunner
+    click.echo(f"Production daemon started; checking every {check_every}s. Ctrl-C to stop.")
+    JobRunner(Database()).daemon(check_every_seconds=check_every)
+
+
+@metrics.command("refresh")
+@click.option("--portfolio", "portfolio_name", default=None,
+              help="Refresh only this portfolio (default: all).")
+@click.option("--from", "start_date", default=None,
+              help="Recompute from this date onward (YYYY-MM-DD).")
+@click.option("--full", is_flag=True, help="Recompute the full history (ignore incremental).")
+def metrics_refresh(portfolio_name, start_date, full):
+    """Compute daily security / portfolio / attribution metrics and save to parquet."""
+    from src.attribution import AttributionEngine
+    db = Database()
+    summary = AttributionEngine(db).refresh_all(
+        start_date=start_date, portfolio_name=portfolio_name, full=full,
+    )
+    click.echo(
+        f"Refreshed metrics — security: {summary['security_rows']} rows, "
+        f"portfolio: {summary['portfolio_rows']} rows, "
+        f"attribution: {summary['attribution_rows']} rows "
+        f"(portfolios: {', '.join(summary['portfolios'])})"
+    )
 
 
 @cli.command()

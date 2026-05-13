@@ -16,6 +16,7 @@ dependencies = [
     "plotly",
     "duckdb",
     "anthropic",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]
