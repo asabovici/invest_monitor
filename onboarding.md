@@ -117,6 +117,8 @@ src/
 ├── reporting.py     — Risk, exposure, income, sector stress
 ├── attribution.py   — Daily security / portfolio / attribution metrics → parquet
 ├── production.py    — Scheduled-job runner: JobRunner + JOB_REGISTRY
+├── scheduler.py     — systemd --user timer install / uninstall / status
+├── benchmarks.py    — Named benchmark portfolios (60/40, All Seasons, …)
 ├── scenarios.py     — MC scenarios, cross-asset betas, sector stress presets,
 │                      sector-ETF map, asset-class correlations, regime presets
 ├── demo.py          — Seed/reset the data_demo/ dataset
@@ -157,7 +159,11 @@ Collector.update_all_assets()
     calls Database.save_prices() per ticker
 ```
 
-### ETF lookthrough (`Ingester.parse_fund_holdings_csv()`)
+### ETF / Fund lookthrough
+
+Two sources of fund-composition data, plus a shared helper that picks the best available:
+
+**Source 1: vendor holdings CSV (ticker-level)**
 
 ```
 User uploads vendor holdings CSV in the Lookthrough tab
@@ -167,10 +173,52 @@ User uploads vendor holdings CSV in the Lookthrough tab
         normalises weights to fractions
     → Database.save_fund_holdings(fund_ticker, as_of_date, df)
         stored in fund_holdings.parquet keyed by (fund_ticker, as_of_date)
-
-Exposure tab reads Database.get_fund_holdings(ticker) for each ETF/Fund position
-    → disaggregates into underlying sector/type buckets in charts
 ```
+
+**Source 2: yfinance fund profile (sector-level)**
+
+```
+User clicks "Fetch Profile from yfinance" in the Lookthrough tab
+    → Collector.fetch_fund_profile(ticker)
+        reads yfinance.Ticker(ticker).funds_data:
+          - asset_classes      (stockPosition, bondPosition, …)
+          - sector_weightings  (technology, healthcare, …)
+    → Database.save_fund_profile(fund_ticker, as_of_date, ac, sw)
+        stored long-format in fund_profiles.parquet:
+        (fund_ticker, as_of_date, category, key, weight)
+```
+
+**Shared helper: `expand_lookthrough_rows(portfolio, db, prices, enabled, yfinance_fallback=True)`** (in `src/app.py`)
+
+```
+Per position, resolution order:
+  1) vendor holdings (fund_holdings.parquet)  → per-ticker rows tagged Source="vendor"
+  2) yfinance profile (fund_profiles.parquet) → per-sector synthetic rows
+       - equity portion (stock + preferred + convertible + other) spread across
+         sector_weightings; tagged Source="yfinance"
+       - bond / cash portions each emit their own row
+       - inverse / leveraged ETFs (negative positions) get clip+renormalize:
+         negatives → 0, then sum to 1, so dollar invariance holds
+  3) native (no lookthrough or no data)        → opaque fund row, Source="native"
+
+Returns a list of dicts with: Ticker, Name, Type, Sector, Quantity, Cost Basis,
+Current Price, Total Cost, Current Value, P&L, P&L %, Via, Source, _synthetic.
+Share-level fields (Quantity, Cost Basis, Current Price) are None on
+synthetic rows.
+
+Dollar totals (Current Value / Total Cost / P&L) are invariant under
+lookthrough — they're redistributed across constituents, not re-valued.
+```
+
+Consumers:
+- Single Portfolio → 📊 **Overview** tab — toggle default OFF.
+- Single Portfolio → 🥧 **Exposure** tab — toggle default ON. After expansion,
+  rows are grouped by `(Type, Sector)` to drive the donut + sector bar.
+- Multi-Portfolio Dashboard → **Aggregate Exposure** section — toggle default
+  OFF. Aggregates across all portfolios and renders donut + sector bar + a
+  Top-15 underlying-exposures table (which is most useful with lookthrough on,
+  since it surfaces cross-fund concentration like "AAPL appears in VTI, VOO,
+  IWF…").
 
 ---
 
@@ -200,6 +248,43 @@ Portfolio
 - **Historical VaR (95%)** — 5th percentile of observed daily returns
 - **Monte Carlo VaR (95%)** — parametric: 10,000 samples from N(mean, std), take percentile
 - **Covariance matrix** — pairwise annualized covariances; useful for diversification analysis
+
+### Safe Withdrawal Rate (Wealth Projection)
+
+Lives inside the Wealth Projection block in `src/app.py`. Bengen-style fixed-real-dollar withdrawal applied year-by-year, with optional annual rebalancing back to starting-year weights. Both Deterministic and Monte Carlo paths follow the same recipe:
+
+```
+base_withdrawal = starting_value × (primary_swr_pct / 100)
+target_weights  = [pos_i_value / starting_value for each position]  # captured once at year 0
+
+for yr in 1..horizon:
+    # 1) Apply returns to each position independently.
+    pos_values *= (1 + return_for_year)
+    pos_values = max(0, pos_values)
+
+    if apply_withdrawals:
+        # 2) Subtract the year's withdrawal pro-rata across positions.
+        wd_this_year = base_withdrawal × (1 + inflation_pct/100) ^ (yr-1)
+        actual = min(wd_this_year, total)
+        pos_values *= (total - actual) / total
+
+        # 3) Optional rebalance to starting weights — trims winners, tops up
+        #    laggards, prevents drift away from the target mix.
+        if rebalance_annually:
+            year_total = pos_values.sum()
+            pos_values = year_total × target_weights
+```
+
+Per-portfolio state is maintained as a `(n_sims, n_positions)` numpy array in MC mode (and a plain list in Deterministic) so the simulation can compound positions independently while subtracting withdrawals pro-rata across them. The MC rebalance step is a single broadcast `pos_values = year_total[:, None] × tgt_weights[None, :]` — vectorised over all sims in one op, so the perf hit is negligible. For 2k sims × 30y × 30 positions the full loop completes in well under a second.
+
+**Compare mode (MC only)**: `_simulate(swr_pct)` is a closure over the pre-drawn `type_returns` array. Re-running it for each comparison SWR is cheap because the random draws are reused — only the withdrawal arithmetic changes. The survival table iterates compare_swrs ∪ {primary} and reports `(survival %, P10/P50/P90 terminal, median depletion year)` for each.
+
+**Outputs:**
+- `_depletion_year(paths)` finds the first year each path drops to ≤ $1e-6 and returns the median over depleted paths (`None` if no path depletes).
+- Deterministic milestone table grows a **Depletes** column; TOTAL row reports `"—"` if any portfolio still has money, else the latest depletion year.
+- MC KPI strip grows to 5 columns: P50 / P25 / P75 / Survival % / Median depletion year.
+
+When `apply_withdrawals=False` the behaviour is identical to pre-SWR code (chart, KPIs, tables all unchanged), so the feature is purely additive.
 
 ---
 
@@ -286,6 +371,28 @@ invest-monitor production run-now my_job        # force-run a single job
 invest-monitor production daemon --check-every 60   # long-running loop
 ```
 
+### Scheduling with systemd (`src/scheduler.py`)
+
+On Linux, instead of cron you can install user-level systemd timers from the dashboard or CLI. The scheduler module:
+
+- Detects `systemctl --user` availability (`is_systemd_available()`).
+- Writes `.service` + `.timer` units to `~/.config/systemd/user/`.
+- Service is `Type=oneshot` and `ExecStart`s `invest-monitor production run-now <job>` so each fire goes through the same code path as a manual run, captures the same logs, and updates `production_jobs.parquet` the same way.
+- Timer uses `OnBootSec=5min`, `OnUnitActiveSec=<interval>min`, `Persistent=true` (catches up runs missed while the machine was off).
+
+`_detect_runner()` picks the most reliable launcher: `uv run invest-monitor` if uv is on PATH and we're in the project root, then `invest-monitor` binary, then `python3 -m src.cli`. `WorkingDirectory` is set to the current cwd so relative paths in `data/` keep working.
+
+CLI:
+
+```bash
+invest-monitor production schedule list
+invest-monitor production schedule install refresh_attribution
+invest-monitor production schedule install collect_prices --interval 720   # override
+invest-monitor production schedule uninstall refresh_attribution
+```
+
+The Production view's **📅 Schedule with systemd** section renders the same controls per job, plus a "Preview unit files" expander so you can review the generated `.service` / `.timer` content before clicking Install.
+
 Inspect any file:
 
 ```python
@@ -306,9 +413,9 @@ The dashboard has two views (sidebar radio: Single Portfolio / Multi-Portfolio D
 
 | Tab | Contents |
 |-----|----------|
-| 📊 Overview | Position table with P&L, allocation donut |
+| 📊 Overview | Position table with P&L, allocation donut. **🔍 Lookthrough toggle** (default OFF) replaces fund positions with per-holding rows (vendor) or per-sector synthetic rows (yfinance fallback) |
 | 📈 Price History | Normalised prices, cumulative returns, daily returns |
-| 🥧 Exposure | Asset-type pie, sector bar — ETF/Fund positions disaggregated via fund_holdings or yfinance fund_profile |
+| 🥧 Exposure | Asset-type pie, sector bar — driven by `expand_lookthrough_rows`. **🔍 Lookthrough toggle** (default ON) controls whether ETF/Fund positions are disaggregated via vendor holdings → yfinance fallback → native |
 | ⚠️ Risk | Volatility, VaR, correlation heatmap, return distribution, covariance heatmap, **Sector Stress Test** (Custom / Implied-from-driver-sector / named scenarios) |
 | 💵 Income | KPI strip + asset-type donut + payment-frequency-aware 12-month schedule + per-position detail |
 | ✏️ Positions | Editable position table, add new positions |
@@ -318,11 +425,12 @@ The dashboard has two views (sidebar radio: Single Portfolio / Multi-Portfolio D
 
 **Multi-Portfolio Dashboard** (top to bottom):
 - KPI strip (Portfolios, Positions, Total Cost, Current Value, Unrealised P&L)
+- **Aggregate Exposure** — asset-type donut + sector bar + Top-15 underlying-exposures table, all driven by `expand_lookthrough_rows`. The **🔍 Lookthrough toggle** (default OFF) determines whether ETF/Fund positions across *all* portfolios are disaggregated. With lookthrough on, the Top-15 table surfaces cross-fund concentration (e.g. "$X of AAPL via VTI + VOO + IWF")
 - Summary table with merged-TOTAL row (returns, vol, VaR, drawdown)
 - Cumulative-return / risk / drawdown comparison charts
 - **Income Projection** (annual/monthly/yield KPIs + per-portfolio + donut + monthly schedule + per-position)
 - **Performance Attribution** (cum-return + drawdown over a chosen period, top 10 contributors/detractors, cumulative contribution by asset type — populated from the `daily_*.parquet` files)
-- **Wealth Projection** — Deterministic or Monte Carlo (with cross-asset correlation matrix and historical regime presets)
+- **Wealth Projection** — Deterministic or Monte Carlo (with cross-asset correlation matrix and historical regime presets). Optional shared **💰 Withdrawals (Safe Withdrawal Rate)** expander: Bengen-style fixed-real-dollar withdrawal applied year-by-year, pro-rata across positions, with optional inflation growth. In MC mode there's a "Compare with" multiselect that re-runs the simulation against the same return paths for multiple SWRs and renders a survival table
 - **🤖 Ask the Agents** — embedded chat panel with Risk / Wealth / Research tabs (independent histories per agent, scoped per mode)
 
 > Performance attribution and embedded agent chat live exclusively on the Multi-Portfolio Dashboard view. Income, stress test, etc. are mirrored in the Single Portfolio tabs.
@@ -387,6 +495,12 @@ Both features can be combined. The output includes P5–P95 percentile outcomes,
 - **v2 quirks worth knowing**: trades on non-trading days snap to the next trading day so no quantity is lost; running positions are floored at 0 (no shorting modelled); positions before the very first trade are 0, so attribution rows simply don't exist for that pre-history window.
 - **Production runner state is per-data-dir**: `production_jobs.parquet` and `production_runs.parquet` live in `data/` and `data_demo/` separately, so demo mode has its own independent schedule + run log. Flipping demo mode while the daemon is running against the live dir is safe — they don't share state.
 - **`production run` is idempotent and cron-friendly**: it only fires jobs whose interval has elapsed, so running it every minute does nothing most of the time. Don't introduce side-effects in a job that aren't safe under re-execution; the runner doesn't dedupe within a single interval.
+- **systemd-installed timers run `invest-monitor production run-now <job>`, not `production run`**: each timer drives its own job, ignoring the in-DB interval and the per-job `enabled` toggle. If you uncheck **Enabled** in the dashboard while the systemd timer is installed, the timer still fires — uninstall the timer or use the manual `production run` path if you want the toggle to gate firing.
+- **`WorkingDirectory` in the generated unit is set to the CWD at install time** (typically the project root). If you move the project, run `production schedule uninstall <job>` then `install <job>` again to regenerate units with the new path.
+- **Inverse / leveraged ETFs under lookthrough**: when yfinance reports negative `stockPosition` (e.g. SH = −1.0 with cashPosition 1.82), `expand_lookthrough_rows` clips negatives to 0 and renormalises the remaining components so they sum to 1. This preserves dollar invariance (total Current Value before vs after lookthrough is unchanged within float-noise tolerance, ~$10 on $600k+ portfolios) but **loses the "short equity" signal** — an inverse-S&P ETF looks through to ~100% Cash, which is its actual collateral composition. If you need the short-exposure dimension, leave lookthrough off for those holdings.
+- **SWR rebalancing target = starting-year weights**: the rebalance step (when on) snaps each position back to `current_total × (starting_value_i / starting_total)`. The user's current portfolio mix at year 0 *is* the implicit target — there's no separate target-allocation input. If you want a different rebalance target (e.g. a glide path from 80/20 → 40/60 over retirement), that's a follow-up — call it out and we'll add it.
+- **Pro-rata withdrawal vs rebalance order matters**: withdrawals are subtracted *before* the rebalance step, not after. So the "annual rebalance" zeroes the drift that built up during that year's returns AND the post-withdrawal asset mix. With rebalance OFF, the drift accumulates and withdrawals shrink the drifted mix uniformly.
+- **SWR withdrawal cap at zero**: when the year's withdrawal exceeds the total, the cap takes only what's left and the portfolio hits exactly 0 that year. Subsequent years' returns × 0 = 0, so once depleted, depleted. Realistic for retirement modelling; less realistic if you actually have other cash sources to fall back on (those aren't modelled).
 - **`portfolios.parquet` and `positions.parquet` must stay in sync** — writing one without the other leaves the portfolio invisible to `portfolio list`. `Database.save_portfolio()` handles both atomically. `get_portfolio()` was extended to return an empty Portfolio if the name exists in `portfolios.parquet` but has no positions (so newly-created empty portfolios load correctly).
 - **Adding a column to a parquet file is auto-migrated** — `Database._init_store()` now backfills missing columns with defaults from `_MIGRATION_DEFAULTS`. So adding a column requires (a) declaring it in the schema dict, (b) adding a default in `_MIGRATION_DEFAULTS` if non-`None`, (c) reading/writing it in the relevant methods. No more manual parquet deletion.
 - **Streamlit cached resources are keyed by `data_dir`** — `get_db()` and `get_reporting()` use `@st.cache_resource`-wrapped factories `_make_db(data_dir)` / `_make_reporting(data_dir)`, so live and demo modes don't share cached state. The `fetch_prices` cache is also keyed on the active directory.

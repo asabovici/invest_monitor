@@ -104,7 +104,10 @@ class ReportingEngine:
           Annual Income, Monthly Income, Payment Frequency, Yield on Base (%).
         """
         latest_prices = latest_prices or {}
-        rate_in_dollars_types = (AssetType.STOCK, AssetType.ETF, AssetType.FUND)
+        # Compare on .value rather than the enum member — Streamlit hot-reload
+        # can re-import AssetType under a different class identity, which makes
+        # `enum_member in (AssetType.X, …)` return False for genuine matches.
+        rate_in_dollars_vals = {"Stock", "ETF", "Fund"}
         rows = []
         for pos in portfolio.positions:
             price = latest_prices.get(pos.asset.ticker)
@@ -115,7 +118,7 @@ class ReportingEngine:
             rate = float(getattr(pos.asset, "income_rate", 0.0) or 0.0)
             freq = int(getattr(pos.asset, "payment_frequency", 1) or 1)
 
-            if pos.asset.asset_type in rate_in_dollars_types:
+            if pos.asset.asset_type.value in rate_in_dollars_vals:
                 annual = pos.quantity * rate * freq
                 unit = "$/share/payment"
             else:
@@ -163,13 +166,14 @@ class ReportingEngine:
         for pos in portfolio.positions:
             ticker = pos.asset.ticker
             at = pos.asset.asset_type
+            at_val = at.value
             price = latest_prices.get(ticker)
             if price is None or (isinstance(price, float) and np.isnan(price)):
                 base_value = pos.quantity * pos.cost_basis
             else:
                 base_value = pos.quantity * float(price)
 
-            if at in (AssetType.ETF, AssetType.FUND):
+            if at_val in ("ETF", "Fund"):
                 profile = self.db.get_fund_profile(ticker)
                 asset_classes = profile.get("asset_classes") or {}
                 sector_weights = profile.get("sector_weightings") or {}
@@ -204,7 +208,7 @@ class ReportingEngine:
                     + cash_w * 0.0
                 )
 
-            elif at == AssetType.STOCK:
+            elif at_val == "Stock":
                 sec = normalize_sector(pos.asset.sector)
                 if sec and sec in sector_shocks:
                     shock_pct = sector_shocks[sec]

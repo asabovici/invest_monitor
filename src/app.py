@@ -88,6 +88,169 @@ def fmt_pct(v) -> str:
     return f"{v:.2f}%"
 
 
+def expand_lookthrough_rows(
+    portfolio: "Portfolio",
+    db: "Database",
+    latest_prices_map: dict[str, float],
+    enabled: bool = True,
+    yfinance_fallback: bool = True,
+) -> list[dict]:
+    """Expand a portfolio's positions into display rows, optionally replacing
+    ETF/Fund positions with their constituents.
+
+    Resolution order per fund (highest fidelity first):
+      1. `fund_holdings.parquet` — vendor-uploaded ticker-level rows.
+      2. `fund_profiles.parquet` — yfinance asset_classes + sector_weightings
+         (no constituent tickers, only sector and asset-class aggregates).
+      3. Keep the fund as a single native row.
+
+    Dollar totals (Current Value / Total Cost / P&L) are invariant under
+    lookthrough — they're redistributed across constituent rows. Share-level
+    fields (Quantity, Cost Basis, Current Price) are None for synthetic rows.
+    """
+    from src.scenarios import SECTOR_DISPLAY  # local import to avoid circulars
+
+    rows: list[dict] = []
+    for pos in portfolio.positions:
+        ticker = pos.asset.ticker
+        cp = latest_prices_map.get(ticker)
+        if cp is None or (isinstance(cp, float) and np.isnan(cp)):
+            cur_val = pos.quantity * pos.cost_basis
+            cp_for_display = None
+        else:
+            cur_val = pos.quantity * float(cp)
+            cp_for_display = float(cp)
+        total_cost = pos.quantity * pos.cost_basis
+        pnl = cur_val - total_cost
+
+        is_fund = pos.asset.asset_type.value in ("ETF", "Fund")
+        holdings = db.get_fund_holdings(ticker) if (enabled and is_fund) else pd.DataFrame()
+
+        # ── 1) Vendor holdings (highest fidelity) ─────────────────────────────
+        if not holdings.empty:
+            for _, h in holdings.iterrows():
+                w = float(h["weight"]) if pd.notna(h.get("weight")) else 0.0
+                holding_ticker = str(h.get("holding_ticker") or "").strip() or "—"
+                rows.append({
+                    "Ticker":        holding_ticker,
+                    "Name":          (str(h.get("holding_name") or "").strip()) or holding_ticker,
+                    "Type":          (str(h.get("asset_type") or "").strip()) or "Stock",
+                    "Sector":        (str(h.get("sector")     or "").strip()) or "Unknown",
+                    "Quantity":      None,
+                    "Cost Basis":    None,
+                    "Current Price": None,
+                    "Total Cost":    total_cost * w,
+                    "Current Value": cur_val   * w,
+                    "P&L":           pnl       * w,
+                    "P&L %":         (pnl / total_cost * 100) if total_cost else None,
+                    "Via":           ticker,
+                    "Source":        "vendor",
+                    "_synthetic":    True,
+                })
+            continue
+
+        # ── 2) yfinance fund_profile (sector-level fallback) ──────────────────
+        if enabled and is_fund and yfinance_fallback:
+            profile = db.get_fund_profile(ticker)
+            asset_classes = profile.get("asset_classes") or {}
+            sector_weights = profile.get("sector_weightings") or {}
+            if asset_classes or sector_weights:
+                # Raw asset-class weights as reported by yfinance.
+                raw_stock = float(asset_classes.get("stockPosition", 0.0) or 0.0)
+                raw_bond  = float(asset_classes.get("bondPosition",  0.0) or 0.0)
+                raw_cash  = float(asset_classes.get("cashPosition",  0.0) or 0.0)
+                raw_pref  = float(asset_classes.get("preferredPosition",   0.0) or 0.0)
+                raw_conv  = float(asset_classes.get("convertiblePosition", 0.0) or 0.0)
+                raw_other = float(asset_classes.get("otherPosition",       0.0) or 0.0)
+                # Inverse / leveraged funds report negative positions (e.g. SH
+                # has stockPosition=-1.0, cashPosition=1.82). Clip negatives to
+                # 0 and renormalise so the components sum to 1.0 — this loses
+                # the "short equity" signal but keeps the total dollar value
+                # invariant under lookthrough.
+                clipped = {
+                    "stock":  max(0.0, raw_stock),
+                    "bond":   max(0.0, raw_bond),
+                    "cash":   max(0.0, raw_cash),
+                    "pref":   max(0.0, raw_pref),
+                    "conv":   max(0.0, raw_conv),
+                    "other":  max(0.0, raw_other),
+                }
+                total = sum(clipped.values())
+                if total > 0:
+                    stock_w = clipped["stock"] / total
+                    bond_w  = clipped["bond"]  / total
+                    cash_w  = clipped["cash"]  / total
+                    pref_w  = clipped["pref"]  / total
+                    conv_w  = clipped["conv"]  / total
+                    other_w = clipped["other"] / total
+
+                    def _emit(weight: float, name: str, atype: str, sector: str,
+                              via_label: str | None = None):
+                        if weight <= 0:
+                            return
+                        rows.append({
+                            "Ticker":        f"{ticker} → {via_label or sector}",
+                            "Name":          name,
+                            "Type":          atype,
+                            "Sector":        sector,
+                            "Quantity":      None,
+                            "Cost Basis":    None,
+                            "Current Price": None,
+                            "Total Cost":    total_cost * weight,
+                            "Current Value": cur_val   * weight,
+                            "P&L":           pnl       * weight,
+                            "P&L %":         (pnl / total_cost * 100) if total_cost else None,
+                            "Via":           ticker,
+                            "Source":        "yfinance",
+                            "_synthetic":    True,
+                        })
+
+                    # Equity portion → spread across sector_weightings if present.
+                    equity_w = stock_w + pref_w + conv_w + other_w
+                    if equity_w > 0:
+                        if sector_weights:
+                            sw_total = sum(sector_weights.values()) or 1.0
+                            for sec_key, sw in sector_weights.items():
+                                if sw <= 0:
+                                    continue
+                                sec_label = SECTOR_DISPLAY.get(sec_key, sec_key.replace("_", " ").title())
+                                _emit(
+                                    equity_w * (sw / sw_total),
+                                    name=f"{sec_label} (via {ticker})",
+                                    atype="Stock",
+                                    sector=sec_label,
+                                )
+                        else:
+                            _emit(equity_w, name=f"Equity (via {ticker})",
+                                  atype="Stock", sector="Unknown", via_label="Equity")
+                    if bond_w > 0:
+                        _emit(bond_w, name=f"Bond portion (via {ticker})",
+                              atype="Bond", sector="Fixed Income", via_label="Bond")
+                    if cash_w > 0:
+                        _emit(cash_w, name=f"Cash portion (via {ticker})",
+                              atype="Cash", sector="Cash", via_label="Cash")
+                    continue  # done with this position via yfinance fallback
+
+        # ── 3) Native row (no lookthrough or no data) ─────────────────────────
+        rows.append({
+            "Ticker":        ticker,
+            "Name":          pos.asset.name or "",
+            "Type":          pos.asset.asset_type.value,
+            "Sector":        pos.asset.sector or "—",
+            "Quantity":      pos.quantity,
+            "Cost Basis":    pos.cost_basis,
+            "Current Price": cp_for_display,
+            "Total Cost":    total_cost,
+            "Current Value": cur_val,
+            "P&L":           pnl,
+            "P&L %":         (pnl / total_cost * 100) if total_cost else None,
+            "Via":           "",
+            "Source":        "native",
+            "_synthetic":    False,
+        })
+    return rows
+
+
 def _fmt_income_rate(row) -> str:
     """Format an income-rate row with the unit suffix from its 'Income Rate Unit'.
     Stock/ETF/Fund → "$X.XXXX/share"; Bond/CD/Cash → "X.XX%".
@@ -139,7 +302,9 @@ def compute_portfolio_metrics(portfolio: Portfolio) -> dict | None:
     #   Bond/CD/Cash   : annual %        → annual yield = rate / 100
     # Daily contribution = annual_yield / 252. NaN + x = NaN so the validity
     # mask below is unaffected.
-    rate_in_dollars = (AssetType.STOCK, AssetType.ETF, AssetType.FUND)
+    # Compare by .value to be robust against Streamlit hot-reload re-importing
+    # AssetType under a different class identity.
+    rate_in_dollars_vals = {"Stock", "ETF", "Fund"}
     pos_by_ticker = {pos.asset.ticker: pos for pos in portfolio.positions}
     annual_yield = {}
     for t in available:
@@ -148,7 +313,7 @@ def compute_portfolio_metrics(portfolio: Portfolio) -> dict | None:
             annual_yield[t] = 0.0
             continue
         rate = float(getattr(pos.asset, "income_rate", 0.0) or 0.0)
-        if pos.asset.asset_type in rate_in_dollars:
+        if pos.asset.asset_type.value in rate_in_dollars_vals:
             freq = int(getattr(pos.asset, "payment_frequency", 1) or 1)
             last_px = prices[t].dropna()
             last_px = float(last_px.iloc[-1]) if not last_px.empty else 0.0
@@ -395,6 +560,104 @@ if view == "Multi-Portfolio Dashboard":
         k5.metric("Unrealised P&L", fmt_usd(total_pnl_all), delta=fmt_pct(total_pnl_pct))
     else:
         k5.metric("Unrealised P&L", fmt_usd(total_pnl_all))
+
+    st.markdown("---")
+
+    # ── Aggregate Exposure (with optional lookthrough) ────────────────────────
+    _dash_db = get_db()
+    # Find funds across all portfolios with either source of lookthrough data.
+    vendor_set: set[str] = set()
+    yfinance_set: set[str] = set()
+    for p in portfolios_by_name.values():
+        for pos in p.positions:
+            if pos.asset.asset_type.value not in ("ETF", "Fund"):
+                continue
+            t = pos.asset.ticker
+            if t in vendor_set or t in yfinance_set:
+                continue
+            if not _dash_db.get_fund_holdings(t).empty:
+                vendor_set.add(t)
+                continue
+            prof = _dash_db.get_fund_profile(t)
+            if (prof.get("asset_classes") or {}) or (prof.get("sector_weightings") or {}):
+                yfinance_set.add(t)
+
+    st.subheader("Aggregate Exposure")
+    if vendor_set or yfinance_set:
+        dash_lookthrough = st.toggle(
+            "🔍 Apply ETF / Fund lookthrough",
+            value=False, key="dashboard_lookthrough_toggle",
+            help=(
+                "When on, ETF/Fund positions are replaced by their constituents. "
+                "Dollar totals stay the same — only the breakdown changes.\n\n"
+                f"• **Vendor holdings** (ticker-level): "
+                f"{', '.join(sorted(vendor_set)) if vendor_set else '—'}\n"
+                f"• **yfinance profile fallback** (sector-level): "
+                f"{', '.join(sorted(yfinance_set)) if yfinance_set else '—'}"
+            ),
+        )
+    else:
+        dash_lookthrough = False
+        st.caption(
+            "💡 No ETF/Fund holdings or profiles loaded yet — upload a vendor CSV "
+            "or use **Fetch Profile from yfinance** in any portfolio's "
+            "**🔍 Lookthrough** tab to enable decomposition here."
+        )
+
+    all_rows: list[dict] = []
+    for pname, p in portfolios_by_name.items():
+        for r in expand_lookthrough_rows(p, _dash_db, latest, enabled=dash_lookthrough):
+            r["Portfolio"] = pname
+            all_rows.append(r)
+
+    if all_rows:
+        agg_df = pd.DataFrame(all_rows)
+        type_agg = agg_df.groupby("Type")["Current Value"].sum().reset_index()
+        type_agg = type_agg[type_agg["Current Value"] > 0]
+        sector_agg = (
+            agg_df.groupby("Sector")["Current Value"].sum().reset_index()
+            .sort_values("Current Value", ascending=True)
+        )
+        sector_agg = sector_agg[sector_agg["Current Value"] > 0]
+
+        col_t, col_s = st.columns(2)
+        with col_t:
+            if not type_agg.empty:
+                title_suffix = " — with lookthrough" if dash_lookthrough else ""
+                fig_t = px.pie(
+                    type_agg, names="Type", values="Current Value",
+                    title=f"By Asset Type{title_suffix}", hole=0.45,
+                )
+                fig_t.update_traces(textposition="inside", textinfo="percent+label")
+                st.plotly_chart(fig_t, use_container_width=True)
+        with col_s:
+            if not sector_agg.empty:
+                fig_s = px.bar(
+                    sector_agg, x="Current Value", y="Sector", orientation="h",
+                    title="By Sector", labels={"Current Value": "Value (USD)"},
+                )
+                fig_s.update_layout(yaxis_title="", xaxis_tickformat="$,.0f")
+                st.plotly_chart(fig_s, use_container_width=True)
+
+        # Top tickers table — most useful with lookthrough since it surfaces
+        # underlying concentrations even when held via different ETFs.
+        top_ticker = (
+            agg_df.groupby("Ticker")
+            .agg(**{
+                "Current Value": ("Current Value", "sum"),
+                "Type":          ("Type", "first"),
+                "Sector":        ("Sector", "first"),
+                "Held Via":      ("Via",  lambda s: ", ".join(sorted({v for v in s if v})) or "—"),
+            })
+            .reset_index()
+            .sort_values("Current Value", ascending=False)
+            .head(15)
+        )
+        if not top_ticker.empty:
+            top_ticker["Current Value"] = top_ticker["Current Value"].map(fmt_usd)
+            label = "Top 15 underlying exposures" if dash_lookthrough else "Top 15 positions"
+            st.markdown(f"**{label}**")
+            st.dataframe(top_ticker, use_container_width=True, hide_index=True)
 
     st.markdown("---")
 
@@ -676,6 +939,25 @@ if view == "Multi-Portfolio Dashboard":
             .transform(lambda s: (1.0 + s.fillna(0.0)).cumprod() - 1.0)
         )
 
+        # Benchmark overlay selection
+        from src.benchmarks import (
+            BENCHMARKS, benchmark_daily_returns, benchmark_stats,
+        )
+        selected_benchmarks = st.multiselect(
+            "Overlay benchmarks",
+            options=list(BENCHMARKS.keys()),
+            default=[],
+            key="attr_bench_select",
+            help=(
+                "Compare each portfolio against canonical benchmark recipes "
+                "(60/40, All Seasons, Golden Butterfly, etc.). Benchmarks are "
+                "built from public ETF proxies — if the chart line is missing "
+                "or sparse, run `invest-monitor benchmarks fetch` to pull prices "
+                "for the proxy tickers, then **Refresh metrics**."
+            ),
+        )
+
+        # Build the cumulative-return chart, optionally overlaying benchmarks.
         col_ret, col_dd = st.columns(2)
         with col_ret:
             fig_ret = px.line(
@@ -683,6 +965,20 @@ if view == "Multi-Portfolio Dashboard":
                 title=f"Cumulative return — {period_label}",
                 labels={"window_cum": "Cumulative Return", "date": ""},
             )
+            # Overlay each selected benchmark as a dashed line, rebased to the
+            # same window start so directly comparable to the portfolio lines.
+            cutoff_str = cutoff.strftime("%Y-%m-%d")
+            for bname in selected_benchmarks:
+                b = BENCHMARKS[bname]
+                daily_b = benchmark_daily_returns(b, _attr_db, start_date=cutoff_str)
+                if daily_b.empty:
+                    continue
+                cum_b = (1.0 + daily_b).cumprod() - 1.0
+                fig_ret.add_trace(go.Scatter(
+                    x=cum_b.index, y=cum_b.values, mode="lines",
+                    name=f"{bname} (benchmark)",
+                    line=dict(dash="dash", width=2),
+                ))
             fig_ret.update_layout(yaxis_tickformat=".1%", hovermode="x unified")
             st.plotly_chart(fig_ret, use_container_width=True)
         with col_dd:
@@ -708,6 +1004,43 @@ if view == "Multi-Portfolio Dashboard":
                 "Latest Value": fmt_usd(last["total_value"]),
             })
         st.dataframe(pd.DataFrame(end_kpi_rows), use_container_width=True, hide_index=True)
+
+        # Benchmark stats table over the same window (when overlays are picked)
+        if selected_benchmarks:
+            bench_rows = []
+            for bname in selected_benchmarks:
+                stats_b = benchmark_stats(BENCHMARKS[bname], _attr_db, start_date=cutoff_str)
+                pr = stats_b.get("period_return")
+                vol = stats_b.get("vol_annualised")
+                mdd = stats_b.get("max_drawdown")
+                bench_rows.append({
+                    "Benchmark": bname,
+                    "Period Return": f"{pr:+.2%}" if pr is not None else "—",
+                    "Annualised Vol": f"{vol*100:.2f}%" if vol is not None else "—",
+                    "Max Drawdown (window)": f"{mdd*100:.2f}%" if mdd is not None else "—",
+                    "# Proxies": len(BENCHMARKS[bname].proxies),
+                })
+            st.markdown("**Benchmark stats over the same window**")
+            st.dataframe(pd.DataFrame(bench_rows), use_container_width=True, hide_index=True)
+
+            # vs-benchmark delta: portfolio period return minus the first
+            # selected benchmark's period return. Quick "did I beat it" read.
+            primary_bench = selected_benchmarks[0]
+            primary_pr = benchmark_stats(
+                BENCHMARKS[primary_bench], _attr_db, start_date=cutoff_str,
+            ).get("period_return")
+            if primary_pr is not None:
+                delta_rows = []
+                for r in end_kpi_rows:
+                    # Re-parse the period return string back to a float for math.
+                    pr_pct = float(r["Period Return"].rstrip("%")) / 100.0
+                    delta_rows.append({
+                        "Portfolio": r["Portfolio"],
+                        "Period Return": r["Period Return"],
+                        f"vs {primary_bench}": f"{(pr_pct - primary_pr) * 100:+.2f}%",
+                    })
+                st.markdown(f"**vs {primary_bench} (period return delta)**")
+                st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
 
         # Attribution: top contributors / detractors in the window
         attr_all = _attr_db.get_daily_attribution(start_date=cutoff.strftime("%Y-%m-%d"))
@@ -775,6 +1108,63 @@ if view == "Multi-Portfolio Dashboard":
             return pos.quantity * pos.cost_basis
         return pos.quantity * float(price)
 
+    # ── Shared withdrawal settings (Safe Withdrawal Rate) ─────────────────────
+    with st.expander("💰 Withdrawals (Safe Withdrawal Rate)", expanded=False):
+        apply_withdrawals = st.checkbox(
+            "Apply annual withdrawals", value=False, key="wp_apply_withdrawals",
+            help=(
+                "Subtract an annual cash withdrawal from the portfolio. Classic "
+                "Bengen 4% rule: dollar amount = SWR% × today's portfolio value, "
+                "fixed in real terms (with inflation adjustment) for the horizon."
+            ),
+        )
+        if apply_withdrawals:
+            col_swr, col_inf = st.columns(2)
+            with col_swr:
+                primary_swr_pct = st.number_input(
+                    "Primary withdrawal rate (% of starting value)",
+                    min_value=0.0, max_value=20.0, value=4.0, step=0.25,
+                    format="%.2f", key="wp_swr_primary",
+                )
+            with col_inf:
+                inflation_pct = st.number_input(
+                    "Inflation adjustment (%/yr)",
+                    min_value=0.0, max_value=20.0, value=3.0, step=0.25,
+                    format="%.2f", key="wp_inflation",
+                    help="Withdrawal grows by this rate each year. Set to 0 for a flat nominal withdrawal.",
+                )
+
+            rebalance_annually = st.checkbox(
+                "Rebalance to starting weights each year",
+                value=True, key="wp_rebalance",
+                help=(
+                    "After applying returns + withdrawal, snap each position back to "
+                    "its starting-year weight × current total. Models a disciplined "
+                    "annual rebalance — keeps the asset mix from drifting away from "
+                    "target as different types compound at different rates."
+                ),
+            )
+
+            if method == "Monte Carlo":
+                compare_swrs = st.multiselect(
+                    "Compare success rate at additional withdrawal rates",
+                    options=[2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0],
+                    default=[3.0, 4.0, 5.0],
+                    key="wp_compare_swrs",
+                    help=(
+                        "For each rate, the simulation reports the % of paths that "
+                        "still have money at the horizon. Useful for finding the "
+                        "highest rate that meets your target success threshold."
+                    ),
+                )
+            else:
+                compare_swrs = []
+        else:
+            primary_swr_pct = 0.0
+            inflation_pct = 0.0
+            compare_swrs = []
+            rebalance_annually = False
+
     if method == "Deterministic":
         with st.expander("Projection Settings", expanded=True):
             col_h, col_p = st.columns([3, 1])
@@ -831,16 +1221,54 @@ if view == "Multi-Portfolio Dashboard":
         milestone_rows = []
         total_values = [0.0] * (horizon + 1)
         milestone_years = [yr for yr in milestone_year_options if yr <= horizon]
+        # Track year-of-depletion per portfolio so the milestone table can flag it.
+        depletion_year: dict[str, int | None] = {}
 
         for pname, p in portfolios_by_name.items():
-            values = [0.0] * (horizon + 1)
-            for pos in p.positions:
-                at = pos.asset.asset_type.value
-                cur = _start_value(pos)
-                values[0] += cur
-                for yr in range(1, horizon + 1):
-                    cur *= 1 + _annual_rate(yr, at)
-                    values[yr] += cur
+            # Per-position state — (value, asset_type). Maintaining per-position
+            # values lets us apply different annual returns AND pro-rata withdraw.
+            pos_state: list[list] = [
+                [_start_value(pos), pos.asset.asset_type.value] for pos in p.positions
+            ]
+            initial_total = sum(v for v, _ in pos_state)
+            values = [initial_total]
+            base_withdrawal = initial_total * (primary_swr_pct / 100.0) if apply_withdrawals else 0.0
+            # Snapshot target weights for optional annual rebalancing.
+            target_weights = (
+                [(v / initial_total) for v, _ in pos_state] if initial_total > 0
+                else [0.0 for _ in pos_state]
+            )
+
+            depleted_at: int | None = None
+            for yr in range(1, horizon + 1):
+                # 1) Apply returns to each position (independent compounding).
+                for i, (v, at) in enumerate(pos_state):
+                    pos_state[i][0] = max(0.0, v * (1 + _annual_rate(yr, at)))
+                total_after_returns = sum(v for v, _ in pos_state)
+
+                # 2) Apply pro-rata withdrawal (Bengen-style: $ amount fixed in
+                #    real terms, grown by inflation each year).
+                if apply_withdrawals and total_after_returns > 0:
+                    wd = base_withdrawal * ((1 + inflation_pct / 100.0) ** (yr - 1))
+                    actual = min(wd, total_after_returns)
+                    ratio = (total_after_returns - actual) / total_after_returns
+                    for i in range(len(pos_state)):
+                        pos_state[i][0] *= ratio
+
+                # 3) Optional rebalance to starting weights so the asset mix
+                #    doesn't drift as different types compound at different rates.
+                if apply_withdrawals and rebalance_annually:
+                    year_total = sum(v for v, _ in pos_state)
+                    if year_total > 0:
+                        for i in range(len(pos_state)):
+                            pos_state[i][0] = year_total * target_weights[i]
+
+                year_total = sum(v for v, _ in pos_state)
+                values.append(year_total)
+                if depleted_at is None and apply_withdrawals and year_total <= 1e-6:
+                    depleted_at = yr
+
+            depletion_year[pname] = depleted_at
 
             for i, v in enumerate(values):
                 total_values[i] += v
@@ -854,6 +1282,10 @@ if view == "Multi-Portfolio Dashboard":
             milestones = {"Portfolio": pname, "Today": fmt_usd(values[0])}
             for yr in milestone_years:
                 milestones[f"Year {yr}"] = fmt_usd(values[yr])
+            if apply_withdrawals:
+                milestones["Depletes"] = (
+                    f"Year {depleted_at}" if depleted_at is not None else "—"
+                )
             milestone_rows.append(milestones)
 
         if len(portfolios_by_name) > 1:
@@ -865,9 +1297,25 @@ if view == "Multi-Portfolio Dashboard":
             total_row = {"Portfolio": "TOTAL", "Today": fmt_usd(total_values[0])}
             for yr in milestone_years:
                 total_row[f"Year {yr}"] = fmt_usd(total_values[yr])
+            if apply_withdrawals:
+                # TOTAL depletes at the latest depletion year across portfolios
+                # — if any portfolio survives, the aggregate isn't depleted.
+                survivors = [pname for pname, dy in depletion_year.items() if dy is None]
+                if survivors:
+                    total_row["Depletes"] = "—"
+                else:
+                    latest_dep = max(d for d in depletion_year.values() if d is not None)
+                    total_row["Depletes"] = f"Year {latest_dep}"
             milestone_rows.append(total_row)
 
+        title_suffix = (
+            f" — withdrawing {primary_swr_pct:.1f}%/yr"
+            f"{f' (+{inflation_pct:.1f}% inflation)' if (apply_withdrawals and inflation_pct) else ''}"
+            f"{', annual rebalance' if (apply_withdrawals and rebalance_annually) else ''}"
+            if apply_withdrawals else ""
+        )
         fig_wealth.update_layout(
+            title=f"Wealth Projection{title_suffix}" if apply_withdrawals else None,
             xaxis_title="Year",
             yaxis_title="Projected Value",
             yaxis_tickprefix="$",
@@ -1000,25 +1448,78 @@ if view == "Multi-Portfolio Dashboard":
         type_growth = np.cumprod(1.0 + type_returns, axis=1)
 
         type_idx = {at: i for i, at in enumerate(ASSET_TYPES)}
-        paths_by_portfolio: dict[str, np.ndarray] = {}
-        total_paths = np.zeros((n_sims, horizon + 1))
 
-        with st.spinner(f"Running {n_sims:,} correlated Monte Carlo paths…"):
+        def _simulate(swr_pct: float) -> tuple[dict[str, np.ndarray], np.ndarray]:
+            """Run the per-position MC under a given SWR.
+            Returns (paths_by_portfolio, total_paths). swr_pct=0 → no withdrawals."""
+            pbp: dict[str, np.ndarray] = {}
+            tp = np.zeros((n_sims, horizon + 1))
+            apply_wd = (apply_withdrawals and swr_pct > 0)
             for pname, p in portfolios_by_name.items():
-                paths = np.zeros((n_sims, horizon + 1))
+                # Per-position arrays so we can compound positions independently
+                # AND subtract withdrawals pro-rata each year.
+                position_info: list[tuple[float, int]] = []
                 for pos in p.positions:
                     at = pos.asset.asset_type.value
                     if at not in type_idx:
-                        continue  # Crypto etc. — skip until a row is added
-                    start_val = _start_value(pos)
-                    growth = type_growth[:, :, type_idx[at]]  # (n_sims, horizon)
-                    pos_paths = np.empty((n_sims, horizon + 1))
-                    pos_paths[:, 0] = start_val
-                    pos_paths[:, 1:] = start_val * growth
-                    paths += pos_paths
+                        continue
+                    position_info.append((_start_value(pos), type_idx[at]))
 
-                paths_by_portfolio[pname] = paths
-                total_paths += paths
+                paths = np.zeros((n_sims, horizon + 1))
+                if not position_info:
+                    pbp[pname] = paths
+                    continue
+
+                pos_values = np.zeros((n_sims, len(position_info)))
+                for i, (sv, _) in enumerate(position_info):
+                    pos_values[:, i] = sv
+                initial_total = float(sum(sv for sv, _ in position_info))
+                paths[:, 0] = initial_total
+                base_withdrawal = initial_total * (swr_pct / 100.0) if apply_wd else 0.0
+                # Snapshot target weights once for optional annual rebalancing.
+                # Shape (n_positions,) — broadcast across sims at apply time.
+                tgt_weights = np.array(
+                    [sv / initial_total for sv, _ in position_info]
+                    if initial_total > 0 else
+                    [0.0] * len(position_info),
+                    dtype=float,
+                )
+                do_rebal = bool(apply_wd and rebalance_annually)
+
+                for yr in range(horizon):
+                    for i, (_, ti) in enumerate(position_info):
+                        pos_values[:, i] *= (1.0 + type_returns[:, yr, ti])
+                    np.clip(pos_values, 0.0, None, out=pos_values)
+
+                    total_after = pos_values.sum(axis=1)
+                    if apply_wd:
+                        wd = base_withdrawal * ((1.0 + inflation_pct / 100.0) ** yr)
+                        actual = np.minimum(wd, total_after)
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            ratio = np.where(
+                                total_after > 0,
+                                (total_after - actual) / total_after,
+                                0.0,
+                            )
+                        pos_values *= ratio[:, None]
+
+                    # Annual rebalance: snap each sim's position values back to
+                    # target weights × current total. Vectorised: outer product
+                    # of (n_sims,) totals with (n_positions,) weights.
+                    if do_rebal:
+                        year_total = pos_values.sum(axis=1)
+                        pos_values = year_total[:, None] * tgt_weights[None, :]
+
+                    paths[:, yr + 1] = pos_values.sum(axis=1)
+
+                pbp[pname] = paths
+                tp += paths
+            return pbp, tp
+
+        with st.spinner(f"Running {n_sims:,} correlated Monte Carlo paths…"):
+            paths_by_portfolio, total_paths = _simulate(
+                primary_swr_pct if apply_withdrawals else 0.0
+            )
 
         # ── Fan chart (combined TOTAL) ───────────────────────────────────────
         pcts = [10, 25, 50, 75, 90]
@@ -1055,8 +1556,13 @@ if view == "Multi-Portfolio Dashboard":
                 annotation_position="top right",
             )
 
+        mc_title = f"Monte Carlo — Combined Portfolios ({n_sims:,} simulations)"
+        if apply_withdrawals:
+            inf_note = f" +{inflation_pct:.1f}% inflation" if inflation_pct else ""
+            rebal_note = ", annual rebalance" if rebalance_annually else ""
+            mc_title += f" — withdrawing {primary_swr_pct:.2f}%/yr{inf_note}{rebal_note}"
         fig_mc.update_layout(
-            title=f"Monte Carlo — Combined Portfolios ({n_sims:,} simulations)",
+            title=mc_title,
             xaxis_title="Year",
             yaxis_title="Projected Value",
             yaxis_tickprefix="$", yaxis_tickformat=",.0f",
@@ -1067,15 +1573,44 @@ if view == "Multi-Portfolio Dashboard":
 
         # ── KPIs ─────────────────────────────────────────────────────────────
         final = total_paths[:, -1]
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Median (P50)",        fmt_usd(float(np.percentile(final, 50))))
-        k2.metric("Worst quartile (P25)", fmt_usd(float(np.percentile(final, 25))))
-        k3.metric("Best quartile (P75)",  fmt_usd(float(np.percentile(final, 75))))
-        if goal > 0:
-            prob = float((final >= goal).mean()) * 100.0
-            k4.metric("P(reach goal)", f"{prob:.1f}%")
+
+        def _depletion_year(paths: np.ndarray) -> float | None:
+            """Median year-of-depletion across paths that hit zero. None if no path depletes."""
+            # First year (1-indexed) each path's value drops to ~0
+            zero_mask = paths <= 1e-6  # shape (n_sims, horizon+1)
+            depleted = zero_mask.any(axis=1)
+            if not depleted.any():
+                return None
+            # argmax over the mask gives first True index; safe because depleted=True ensures one exists
+            first_zero = np.where(depleted, zero_mask.argmax(axis=1), -1)
+            valid = first_zero[first_zero > 0]
+            return float(np.median(valid)) if len(valid) else None
+
+        # Build KPI strip with 4 or 5 cols depending on whether withdrawals are on
+        if apply_withdrawals:
+            survival = float((final > 1e-6).mean()) * 100.0
+            dep_year = _depletion_year(total_paths)
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Median (P50)",        fmt_usd(float(np.percentile(final, 50))))
+            k2.metric("Worst quartile (P25)", fmt_usd(float(np.percentile(final, 25))))
+            k3.metric("Best quartile (P75)",  fmt_usd(float(np.percentile(final, 75))))
+            k4.metric(f"Survival @ {primary_swr_pct:.1f}%", f"{survival:.1f}%",
+                      help="Share of paths still > $0 at the horizon.")
+            k5.metric(
+                "Median depletion year",
+                f"Year {int(dep_year)}" if dep_year is not None else "—",
+                help="Median first-zero year across paths that ran out. — = no path depleted.",
+            )
         else:
-            k4.metric("Expected (mean)", fmt_usd(float(final.mean())))
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Median (P50)",        fmt_usd(float(np.percentile(final, 50))))
+            k2.metric("Worst quartile (P25)", fmt_usd(float(np.percentile(final, 25))))
+            k3.metric("Best quartile (P75)",  fmt_usd(float(np.percentile(final, 75))))
+            if goal > 0:
+                prob = float((final >= goal).mean()) * 100.0
+                k4.metric("P(reach goal)", f"{prob:.1f}%")
+            else:
+                k4.metric("Expected (mean)", fmt_usd(float(final.mean())))
 
         # ── Milestone percentile table (combined) ───────────────────────────
         if milestone_years:
@@ -1086,6 +1621,35 @@ if view == "Multi-Portfolio Dashboard":
                 for yr in milestone_years:
                     row[f"Year {yr}"] = fmt_usd(float(p_curves[pct][yr]))
                 rows.append(row)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # ── SWR comparison table (when extra rates requested) ───────────────
+        if apply_withdrawals and compare_swrs:
+            st.markdown("**Survival across withdrawal rates**")
+            st.caption(
+                "Same return paths (identical RNG seed), only the withdrawal rate "
+                "changes. Find the highest SWR that still meets your target "
+                f"success threshold over {horizon} years."
+            )
+            rows = []
+            # Always include the primary rate; dedupe with compare list.
+            swr_list = sorted({primary_swr_pct, *compare_swrs})
+            for swr in swr_list:
+                if swr == primary_swr_pct:
+                    tp_for_swr = total_paths
+                else:
+                    _, tp_for_swr = _simulate(swr)
+                final_swr = tp_for_swr[:, -1]
+                survival = float((final_swr > 1e-6).mean()) * 100.0
+                dep_year = _depletion_year(tp_for_swr)
+                rows.append({
+                    "Withdrawal rate":   f"{swr:.2f}%",
+                    "Survival @ horizon": f"{survival:.1f}%",
+                    "Median terminal":   fmt_usd(float(np.percentile(final_swr, 50))),
+                    "P10 terminal":      fmt_usd(float(np.percentile(final_swr, 10))),
+                    "P90 terminal":      fmt_usd(float(np.percentile(final_swr, 90))),
+                    "Median depletion year": f"Year {int(dep_year)}" if dep_year is not None else "—",
+                })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
         # ── Per-portfolio summary at horizon end ─────────────────────────────
@@ -1292,6 +1856,66 @@ if view == "⚙️ Production":
                 if r["last_status"] == "error" and r["last_error"]:
                     st.error(f"`{r['last_error']}`")
 
+    # ── systemd scheduling ────────────────────────────────────────────────────
+    from src import scheduler as _sched
+    st.markdown("---")
+    st.subheader("📅 Schedule with systemd")
+    if not _sched.is_systemd_available():
+        st.info(
+            "`systemctl --user` is not available on this system "
+            "(non-Linux, or no user systemd session). To automate jobs, run "
+            "`invest-monitor production run` from cron or any other scheduler."
+        )
+    else:
+        sched_dir = _sched.systemd_user_dir()
+        st.caption(
+            f"User-level timers are written to `{sched_dir}`. Each job gets a "
+            f"`.service` (one-shot `invest-monitor production run-now <job>`) and "
+            f"a `.timer` that fires every `interval_minutes`."
+        )
+
+        sched_states = _sched.list_scheduled()
+        for _, r in jobs_df.iterrows():
+            jname    = r["job_name"]
+            interval = int(r["interval_minutes"]) if r["interval_minutes"] else 1440
+            state    = sched_states.get(jname, {})
+            installed = state.get("installed", False)
+            active    = state.get("active", False)
+            enabled   = state.get("enabled", False)
+            next_run  = state.get("next_run") or "—"
+
+            if installed and active and enabled:
+                badge = "✅ Active"
+            elif installed:
+                badge = f"⚠️ Installed ({state.get('active_raw', '?')}/{state.get('enabled_raw', '?')})"
+            else:
+                badge = "⏸️ Not installed"
+
+            with st.container(border=True):
+                cols = st.columns([2, 2, 2, 1])
+                cols[0].markdown(f"**{jname}**  \n_{badge}_")
+                cols[1].caption("Interval")
+                cols[1].markdown(f"`{interval} min` (≈ {round(interval / 60, 1)} h)")
+                cols[2].caption("Next run")
+                cols[2].markdown(f"`{next_run}`")
+                with cols[3]:
+                    if installed:
+                        if st.button("Uninstall", key=f"sched_uninstall_{jname}"):
+                            res = _sched.uninstall(jname)
+                            (st.success if res["ok"] else st.error)(res["detail"])
+                            st.rerun()
+                    else:
+                        if st.button("Install", key=f"sched_install_{jname}", type="primary"):
+                            res = _sched.install(jname, interval)
+                            (st.success if res["ok"] else st.error)(res["detail"])
+                            st.rerun()
+
+                with st.expander("Preview unit files", expanded=False):
+                    st.caption(f"`{_sched.UNIT_PREFIX}{jname}.service`")
+                    st.code(_sched.service_unit(jname), language="ini")
+                    st.caption(f"`{_sched.UNIT_PREFIX}{jname}.timer`")
+                    st.code(_sched.timer_unit(jname, interval), language="ini")
+
     # ── Run log + Issues tabs ─────────────────────────────────────────────────
     st.markdown("---")
     tab_recent, tab_issues = st.tabs(["📜 Recent Runs", "🚨 Issues"])
@@ -1366,60 +1990,89 @@ with tab_overview:
     if not portfolio.positions:
         st.info("No positions yet. Add some via the **📋 Trades** tab.")
     else:
-        rows = []
+        # Detect which positions can actually be looked through. A fund counts
+        # as lookthroughable if EITHER vendor holdings OR a yfinance fund_profile
+        # is available; the helper falls back from one to the other automatically.
+        _db = get_db()
+        vendor_funds: list[str] = []
+        yfinance_funds: list[str] = []
         for pos in portfolio.positions:
+            if pos.asset.asset_type.value not in ("ETF", "Fund"):
+                continue
             t = pos.asset.ticker
-            cp = cur_prices.get(t)
-            total_cost = pos.quantity * pos.cost_basis
-            cur_val = pos.quantity * cp if cp is not None else None
-            pnl = (cur_val - total_cost) if cur_val is not None else None
-            pnl_pct = (pnl / total_cost * 100) if (pnl is not None and total_cost) else None
-            rows.append({
-                "Ticker": t,
-                "Name": pos.asset.name or "",
-                "Type": pos.asset.asset_type.value,
-                "Sector": pos.asset.sector or "—",
-                "Quantity": pos.quantity,
-                "Cost Basis": pos.cost_basis,
-                "Total Cost": total_cost,
-                "Current Price": cp,
-                "Current Value": cur_val,
-                "P&L": pnl,
-                "P&L %": pnl_pct,
-            })
+            if not _db.get_fund_holdings(t).empty:
+                vendor_funds.append(t)
+                continue
+            prof = _db.get_fund_profile(t)
+            if (prof.get("asset_classes") or {}) or (prof.get("sector_weightings") or {}):
+                yfinance_funds.append(t)
 
+        if vendor_funds or yfinance_funds:
+            lookthrough = st.toggle(
+                "🔍 Apply ETF / Fund lookthrough",
+                value=False, key="overview_lookthrough_toggle",
+                help=(
+                    "When on, ETF/Fund positions are replaced by their constituents.\n\n"
+                    f"• **Vendor holdings** (ticker-level): "
+                    f"{', '.join(vendor_funds) if vendor_funds else '—'}\n"
+                    f"• **yfinance profile fallback** (sector-level): "
+                    f"{', '.join(yfinance_funds) if yfinance_funds else '—'}"
+                ),
+            )
+        else:
+            lookthrough = False
+            st.caption(
+                "💡 No ETF/Fund holdings or profiles loaded for this portfolio yet — "
+                "upload a vendor CSV or click **Fetch Profile from yfinance** in the "
+                "**🔍 Lookthrough** tab to enable lookthrough."
+            )
+
+        rows = expand_lookthrough_rows(portfolio, _db, cur_prices, enabled=lookthrough)
         df = pd.DataFrame(rows)
 
-        total_cost = df["Total Cost"].sum()
+        total_cost  = df["Total Cost"].sum()
         total_value = df["Current Value"].sum() if df["Current Value"].notna().any() else None
-        total_pnl = (total_value - total_cost) if total_value is not None else None
+        total_pnl   = (total_value - total_cost) if total_value is not None else None
         total_pnl_pct = (total_pnl / total_cost * 100) if (total_pnl is not None and total_cost) else None
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Positions", len(portfolio.positions))
-        c2.metric("Total Cost", fmt_usd(total_cost))
+        if lookthrough:
+            n_native    = int((~df["_synthetic"]).sum())
+            n_synth     = int(df["_synthetic"].sum())
+            c1.metric("Positions", f"{len(df)}", delta=f"{n_native} native + {n_synth} looked-through")
+        else:
+            c1.metric("Positions", len(portfolio.positions))
+        c2.metric("Total Cost",    fmt_usd(total_cost))
         c3.metric("Current Value", fmt_usd(total_value))
         if total_pnl is not None:
-            c4.metric("Total P&L", fmt_usd(total_pnl), delta=fmt_pct(total_pnl_pct))
+            c4.metric("Total P&L",  fmt_usd(total_pnl), delta=fmt_pct(total_pnl_pct))
 
         st.markdown("---")
 
-        # Styled display dataframe
         display = df.copy()
-        display["Cost Basis"] = display["Cost Basis"].map(fmt_usd)
-        display["Total Cost"] = display["Total Cost"].map(fmt_usd)
-        display["Current Price"] = display["Current Price"].map(fmt_usd)
-        display["Current Value"] = display["Current Value"].map(fmt_usd)
-        display["P&L"] = display["P&L"].map(fmt_usd)
-        display["P&L %"] = display["P&L %"].map(fmt_pct)
-
+        for col in ("Cost Basis", "Total Cost", "Current Price", "Current Value", "P&L"):
+            if col in display.columns:
+                display[col] = display[col].map(fmt_usd)
+        if "P&L %" in display.columns:
+            display["P&L %"] = display["P&L %"].map(fmt_pct)
+        if not lookthrough:
+            display = display.drop(columns=["Via", "_synthetic"], errors="ignore")
+        else:
+            display = display.drop(columns=["_synthetic"], errors="ignore")
         st.dataframe(display, use_container_width=True, hide_index=True)
 
-        # Mini asset-type donut
-        type_df = df.groupby("Type")["Total Cost"].sum().reset_index()
-        fig = px.pie(type_df, names="Type", values="Total Cost",
-                     title="Allocation by Asset Type (cost basis)",
-                     hole=0.45)
+        # Allocation donut — uses the same (possibly disaggregated) rows.
+        type_df = (
+            df.groupby("Type")["Total Cost"]
+            .sum().reset_index()
+            .sort_values("Total Cost", ascending=False)
+        )
+        title_suffix = " — with lookthrough" if lookthrough else ""
+        fig = px.pie(
+            type_df, names="Type", values="Total Cost",
+            title=f"Allocation by Asset Type (cost basis){title_suffix}",
+            hole=0.45,
+        )
         fig.update_traces(textposition="inside", textinfo="percent+label")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1498,37 +2151,57 @@ with tab_exposure:
     if not portfolio.positions:
         st.info("No positions yet. Add some via the **📋 Trades** tab.")
     else:
-        try:
-            exposure_df = reporting.get_portfolio_exposure(portfolio).reset_index()
+        # Categorise funds by which lookthrough source they have.
+        vendor_funds: list[str] = []
+        yfinance_funds: list[str] = []
+        for pos in portfolio.positions:
+            if pos.asset.asset_type.value not in ("ETF", "Fund"):
+                continue
+            t = pos.asset.ticker
+            if not db.get_fund_holdings(t).empty:
+                vendor_funds.append(t)
+                continue
+            prof = db.get_fund_profile(t)
+            if (prof.get("asset_classes") or {}) or (prof.get("sector_weightings") or {}):
+                yfinance_funds.append(t)
 
-            # Use current values if available, else fall back to cost basis already in df
-            if cur_prices:
-                value_map = {}
-                for pos in portfolio.positions:
-                    cp = cur_prices.get(pos.asset.ticker)
-                    value_map[pos.asset.ticker] = pos.quantity * (cp if cp is not None else pos.cost_basis)
-                # Rebuild with current values, applying lookthrough for ETF/Fund positions
-                rows_exp = []
-                for pos in portfolio.positions:
-                    base = value_map[pos.asset.ticker]
-                    is_fund = pos.asset.asset_type in (AssetType.ETF, AssetType.FUND)
-                    holdings = db.get_fund_holdings(pos.asset.ticker) if is_fund else pd.DataFrame()
-                    if is_fund and not holdings.empty:
-                        for _, h in holdings.iterrows():
-                            rows_exp.append({
-                                "Type": h["asset_type"] or "Lookthrough",
-                                "Sector": h["sector"] or "Unknown",
-                                "Value": h["weight"] * base,
-                                "Via": pos.asset.ticker,
-                            })
-                    elif pos.asset.is_composite():
-                        for c in pos.asset.constituents:
-                            rows_exp.append({"Type": "Constituent", "Sector": "Look-through", "Value": c.weight * base, "Via": pos.asset.ticker})
-                    else:
-                        rows_exp.append({"Type": pos.asset.asset_type.value, "Sector": pos.asset.sector or "Unknown", "Value": base, "Via": ""})
-                exposure_df = pd.DataFrame(rows_exp).groupby(["Type", "Sector"])["Value"].sum().reset_index()
+        if vendor_funds or yfinance_funds:
+            lookthrough = st.toggle(
+                "🔍 Apply ETF / Fund lookthrough",
+                value=True, key="exposure_lookthrough_toggle",
+                help=(
+                    "When on, ETF/Fund positions are replaced by their constituents.\n\n"
+                    f"• **Vendor holdings** (ticker-level): "
+                    f"{', '.join(vendor_funds) if vendor_funds else '—'}\n"
+                    f"• **yfinance profile fallback** (sector-level): "
+                    f"{', '.join(yfinance_funds) if yfinance_funds else '—'}\n\n"
+                    "Upload vendor holdings or click **Fetch Profile from yfinance** "
+                    "in the **🔍 Lookthrough** tab to widen coverage."
+                ),
+            )
+        else:
+            lookthrough = False
+            st.caption(
+                "💡 No ETF/Fund holdings or profiles loaded yet — upload a vendor CSV "
+                "or click **Fetch Profile from yfinance** in the **🔍 Lookthrough** tab "
+                "to enable lookthrough."
+            )
+
+        try:
+            # Use the shared lookthrough helper (handles vendor → yfinance →
+            # native fallback automatically) and groupby (Type, Sector) for
+            # the Exposure breakdown.
+            exp_rows = expand_lookthrough_rows(
+                portfolio, db, cur_prices or {}, enabled=lookthrough,
+            )
+            exp_df_raw = pd.DataFrame(exp_rows)
+            if not exp_df_raw.empty:
+                exposure_df = (
+                    exp_df_raw.groupby(["Type", "Sector"])["Current Value"]
+                    .sum().reset_index().rename(columns={"Current Value": "Value"})
+                )
             else:
-                exposure_df = exposure_df.rename(columns={"Weight": "Value"})
+                exposure_df = pd.DataFrame(columns=["Type", "Sector", "Value"])
 
             total_exp = exposure_df["Value"].sum()
             exposure_df["Weight %"] = exposure_df["Value"] / total_exp * 100
@@ -2196,14 +2869,30 @@ with tab_lookthrough:
 
     db = get_db()
 
-    # Only show ETF/Fund positions from the active portfolio
+    # Only show ETF/Fund positions from the active portfolio.
+    # Compare by .value rather than the enum member — when Streamlit hot-reloads
+    # modules, `AssetType` can get re-imported under a different class identity,
+    # so `pos.asset.asset_type in (AssetType.ETF, AssetType.FUND)` returns False
+    # for genuine ETF positions. The string value is stable across reloads.
+    _FUND_LIKE = {"ETF", "Fund"}
     fund_positions = [
         pos for pos in portfolio.positions
-        if pos.asset.asset_type in (AssetType.ETF, AssetType.FUND)
+        if pos.asset.asset_type.value in _FUND_LIKE
     ]
 
     if not fund_positions:
-        st.info("No ETF or Fund positions found in this portfolio. Add one in the Positions tab first.")
+        n_total = len(portfolio.positions)
+        type_summary = ", ".join(
+            f"{t} × {sum(1 for p in portfolio.positions if p.asset.asset_type.value == t)}"
+            for t in sorted({p.asset.asset_type.value for p in portfolio.positions})
+        ) or "no positions"
+        st.info(
+            f"No ETF or Fund positions in the active portfolio **{portfolio.name}** "
+            f"({n_total} positions: {type_summary}).\n\n"
+            "If you meant a different portfolio, pick it in the sidebar and click "
+            "**Open**. The currently-loaded portfolio is shown as **Active:** "
+            "above the action buttons."
+        )
         st.stop()
 
     fund_tickers = [pos.asset.ticker for pos in fund_positions]

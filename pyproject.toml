@@ -23,6 +23,11 @@ dependencies = [
 dev = [
     "pytest",
 ]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "pymdown-extensions",
+]
 
 [project.scripts]
 invest-monitor = "src.cli:cli"

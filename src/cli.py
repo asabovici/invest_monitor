@@ -104,6 +104,37 @@ def demo_reset():
 
 
 @cli.group()
+def benchmarks():
+    """Named benchmark portfolios (60/40, All Seasons, Golden Butterfly, …)."""
+    pass
+
+
+@benchmarks.command("list")
+def benchmarks_list():
+    """Print every benchmark + its proxy weights."""
+    from src.benchmarks import BENCHMARKS
+    for name, b in BENCHMARKS.items():
+        click.echo(f"\n{name}")
+        click.echo("  " + b.description)
+        rows = [{"ticker": t, "weight": f"{w:.2%}"} for t, w in b.weights.items()]
+        click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@benchmarks.command("fetch")
+@click.option("--period", default="10y",
+              help="yfinance period to pull for each proxy (default 10y).")
+def benchmarks_fetch(period):
+    """Pull price history for every benchmark proxy via yfinance."""
+    from src.benchmarks import all_proxy_tickers
+    from src.collector import Collector
+    db = Database()
+    tickers = all_proxy_tickers()
+    click.echo(f"Fetching prices for {len(tickers)} proxy tickers: {', '.join(tickers)}")
+    Collector(db).collect_prices(tickers, period=period)
+    click.echo("Done.")
+
+
+@cli.group()
 def metrics():
     """Compute & persist daily returns / risk / attribution time series."""
     pass
@@ -176,6 +207,67 @@ def production_daemon(check_every):
     from src.production import JobRunner
     click.echo(f"Production daemon started; checking every {check_every}s. Ctrl-C to stop.")
     JobRunner(Database()).daemon(check_every_seconds=check_every)
+
+
+@production.group()
+def schedule():
+    """Manage systemd user timers for production jobs."""
+    pass
+
+
+@schedule.command("list")
+def schedule_list():
+    """Show systemd-timer status for every registered job."""
+    from src import scheduler as _sched
+    if not _sched.is_systemd_available():
+        raise click.ClickException(
+            "systemd --user is not available on this system."
+        )
+    rows = []
+    for name, st_ in _sched.list_scheduled().items():
+        rows.append({
+            "job":       name,
+            "installed": "yes" if st_.get("installed") else "no",
+            "active":    st_.get("active_raw", "—"),
+            "enabled":   st_.get("enabled_raw", "—"),
+            "next_run":  st_.get("next_run") or "—",
+        })
+    click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@schedule.command("install")
+@click.argument("job_name")
+@click.option("--interval", default=None, type=int,
+              help="Override the job's configured interval (minutes).")
+def schedule_install(job_name, interval):
+    """Install + enable a user systemd timer for one job."""
+    from src import scheduler as _sched
+    from src.production import JOB_REGISTRY
+    if job_name not in JOB_REGISTRY:
+        raise click.ClickException(
+            f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
+        )
+    if interval is None:
+        db = Database()
+        jobs = db.get_production_jobs()
+        match = jobs[jobs["job_name"] == job_name] if not jobs.empty else None
+        interval = int(match["interval_minutes"].iloc[0]) if match is not None and not match.empty \
+                   else int(JOB_REGISTRY[job_name]["interval_minutes"])
+    res = _sched.install(job_name, interval)
+    if not res["ok"]:
+        raise click.ClickException(res["detail"])
+    click.echo(res["detail"])
+
+
+@schedule.command("uninstall")
+@click.argument("job_name")
+def schedule_uninstall(job_name):
+    """Disable + remove the user systemd timer for one job."""
+    from src import scheduler as _sched
+    res = _sched.uninstall(job_name)
+    if not res["ok"]:
+        raise click.ClickException(res["detail"])
+    click.echo(res["detail"])
 
 
 @metrics.command("refresh")
