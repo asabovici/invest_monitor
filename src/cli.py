@@ -104,6 +104,82 @@ def demo_reset():
 
 
 @cli.group()
+def group():
+    """Manage portfolio groups (e.g. Taxable, Tax-Free, Retirement)."""
+    pass
+
+
+@group.command("list")
+def group_list():
+    """List all groups + their members."""
+    db = Database()
+    names = db.list_groups()
+    if not names:
+        click.echo("No groups defined.")
+        return
+    for name in names:
+        members = db.get_group_members(name)
+        desc = db.get_group_description(name) or ""
+        click.echo(f"\n{name}" + (f"  — {desc}" if desc else ""))
+        click.echo(f"  Members ({len(members)}): {', '.join(members) if members else '—'}")
+
+
+@group.command("create")
+@click.argument("name")
+@click.option("--description", default="", help="Optional description for the group.")
+def group_create(name, description):
+    """Create (or update the description of) a group."""
+    db = Database()
+    db.create_group(name, description=description)
+    click.echo(f"Group '{name}' ready.")
+
+
+@group.command("add")
+@click.argument("group_name")
+@click.argument("portfolio_name")
+def group_add(group_name, portfolio_name):
+    """Add a portfolio to a group."""
+    db = Database()
+    if group_name not in db.list_groups():
+        raise click.ClickException(f"Group '{group_name}' does not exist. Create it first.")
+    if portfolio_name not in db.list_portfolios():
+        raise click.ClickException(f"Portfolio '{portfolio_name}' does not exist.")
+    db.add_to_group(group_name, portfolio_name)
+    click.echo(f"Added '{portfolio_name}' to '{group_name}'.")
+
+
+@group.command("remove")
+@click.argument("group_name")
+@click.argument("portfolio_name")
+def group_remove(group_name, portfolio_name):
+    """Remove a portfolio from a group."""
+    db = Database()
+    db.remove_from_group(group_name, portfolio_name)
+    click.echo(f"Removed '{portfolio_name}' from '{group_name}'.")
+
+
+@group.command("delete")
+@click.argument("name")
+def group_delete(name):
+    """Delete a group and clear all its memberships (portfolios are untouched)."""
+    db = Database()
+    db.delete_group(name)
+    click.echo(f"Deleted group '{name}'.")
+
+
+@group.command("show")
+@click.argument("portfolio_name")
+def group_show(portfolio_name):
+    """Show which groups a portfolio belongs to."""
+    db = Database()
+    groups = db.get_groups_for_portfolio(portfolio_name)
+    if not groups:
+        click.echo(f"'{portfolio_name}' is not in any group.")
+    else:
+        click.echo(f"'{portfolio_name}' is in: {', '.join(groups)}")
+
+
+@cli.group()
 def benchmarks():
     """Named benchmark portfolios (60/40, All Seasons, Golden Butterfly, …)."""
     pass

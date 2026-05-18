@@ -19,6 +19,8 @@ All state is stored as Parquet files under `data/` (gitignored). Demo mode uses 
 | `daily_attribution.parquet` | `date, portfolio_name, ticker, weight, position_return, contribution_to_return, asset_type, sector` |
 | `production_jobs.parquet` | `job_name, enabled, interval_minutes, last_run_at, last_status, last_error, last_duration_seconds` |
 | `production_runs.parquet` | `run_id, job_name, started_at, ended_at, status, error_message, details, duration_seconds` |
+| `groups.parquet` | Portfolio group registry: `name, description, created_at` |
+| `portfolio_groups.parquet` | Many-to-many group ↔ portfolio: `group_name, portfolio_name` |
 | `prices/<TICKER>.parquet` | `date` (index), `price` |
 
 ## Key concepts

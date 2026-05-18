@@ -206,6 +206,19 @@ class AttributionEngine:
         if trades.empty:
             return empty_port, empty_attr
 
+        # Pull the current portfolio so we can backfill "legacy" quantities:
+        # positions that existed before the trade ledger starts. Common case
+        # when a user imported holdings via CSV (no trades), then later started
+        # using the Trade Blotter — the recent trades shouldn't make the
+        # legacy holdings appear out of nowhere on the first trade date.
+        try:
+            current_portfolio = self.db.get_portfolio(portfolio_name)
+            current_qty: dict[str, float] = {
+                pos.asset.ticker: float(pos.quantity) for pos in current_portfolio.positions
+            }
+        except Exception:
+            current_qty = {}
+
         # Build per-trade signed quantity delta (BUY +, SELL −).
         trades = trades.copy()
         trades["trade_date"] = pd.to_datetime(trades["trade_date"])
@@ -221,20 +234,35 @@ class AttributionEngine:
                 values="delta_qty", aggfunc="sum", fill_value=0.0,
             ).sort_index()
         )
-        tickers = qty_changes.columns.tolist()
 
+        # Legacy quantity per ticker = current quantity − sum of all recorded
+        # trade deltas. If positive, that quantity was held *before* the first
+        # trade in the ledger and needs to be injected as an implicit opening
+        # position. Also pick up tickers that have no trade history at all.
+        legacy_qty: dict[str, float] = {}
+        for t, q in current_qty.items():
+            net_traded = float(qty_changes[t].sum()) if t in qty_changes.columns else 0.0
+            legacy = q - net_traded
+            if legacy > 1e-6:
+                legacy_qty[t] = legacy
+                # Add the column so it survives the reindex/cumsum below.
+                if t not in qty_changes.columns:
+                    qty_changes[t] = 0.0
+
+        tickers = qty_changes.columns.tolist()
         prices = self.db.get_historical_prices(tickers, start_date=start_date)
         if prices.empty:
             return empty_port, empty_attr
         prices = prices.sort_index()
 
-        # Reindex deltas onto the price calendar so cumulative position state
-        # is defined on every trading day (0 before first trade for a ticker).
-        # Reindexing with method='ffill' would carry deltas forward — we don't
-        # want that — so fill missing dates with 0 and then cumsum.
+        # If we have legacy positions, use the full price calendar — those
+        # positions existed long before the first trade date. Without legacy,
+        # start at the first trade so the chart doesn't have a zero pre-history.
         first_trade_date = qty_changes.index.min()
-        # Limit price index to dates >= first trade (positions are 0 before that).
-        eligible_dates = prices.index[prices.index >= first_trade_date]
+        if legacy_qty:
+            eligible_dates = prices.index
+        else:
+            eligible_dates = prices.index[prices.index >= first_trade_date]
         if len(eligible_dates) == 0:
             return empty_port, empty_attr
 
@@ -248,6 +276,15 @@ class AttributionEngine:
             for src_d, idx in zip(off_calendar, snap_to):
                 if 0 <= idx < len(eligible_dates):
                     deltas_on_calendar.loc[eligible_dates[idx]] += qty_changes.loc[src_d]
+
+        # Inject legacy openings at the first eligible date so the cumsum
+        # starts from the right baseline.
+        if legacy_qty:
+            first_d = eligible_dates[0]
+            for t, q in legacy_qty.items():
+                deltas_on_calendar.loc[first_d, t] = (
+                    float(deltas_on_calendar.loc[first_d, t]) + q
+                )
 
         positions_qty = deltas_on_calendar.cumsum()
         # Floor at 0 — guards against shorting (we don't model it) and tiny

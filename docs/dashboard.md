@@ -29,6 +29,7 @@ The sidebar offers three top-level views: **Multi-Portfolio Dashboard**, **Singl
 
 Top to bottom:
 
+1. **Group filter** (appears once any group exists, see [Portfolio Groups](portfolio-groups.md)) — selectbox to scope the dashboard to one group's members. Adjacent **"View as combined portfolio"** toggle merges those members into one synthetic entity for everything below.
 1. **KPI strip** — Portfolios, Positions, Total Cost, Current Value, Unrealised P&L (with %).
 2. **Aggregate Exposure** — donut + sector bar + Top 15 underlying-exposures table, with the **🔍 Lookthrough toggle**. See [Lookthrough](lookthrough.md).
 3. **Summary** table — 1M/3M/6M/1Y returns, vol, VaR, drawdowns per portfolio + a merged-TOTAL row computed from a synthetic combined portfolio.

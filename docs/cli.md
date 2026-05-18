@@ -47,6 +47,19 @@ invest-monitor metrics refresh --full                     # recompute everything
 
 v2 trade-replay is auto-selected per portfolio when `trades.parquet` has rows for it. See [Performance Attribution](performance-attribution.md).
 
+## Portfolio groups
+
+```bash
+invest-monitor group list                              # all groups + members
+invest-monitor group create "Tax-Free" --description "Roth + HSA + 401k"
+invest-monitor group add "Tax-Free" "PRU401K"
+invest-monitor group remove "Tax-Free" "PRU401K"
+invest-monitor group show "SCHAB"                      # which groups it's in
+invest-monitor group delete "Tax-Free"
+```
+
+See [Portfolio Groups](portfolio-groups.md).
+
 ## Benchmarks
 
 ```bash

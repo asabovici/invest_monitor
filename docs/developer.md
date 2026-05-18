@@ -99,6 +99,12 @@ expand_lookthrough_rows(portfolio, db, prices, enabled=True, yfinance_fallback=T
 !!! info "String columns with all-NaN values"
     pandas infers dtype as `float64`, breaking Streamlit's `TextColumn`. `Database.get_all_assets()` and `get_portfolio()` cast `name`, `sector`, `currency` to `str`/`None` on read. Do the same for any new string columns added to parquet files.
 
+!!! info "Portfolio groups are many-to-many, not partitions"
+    A single portfolio can belong to *N* groups (e.g. SCHAB ∈ {Taxable, Brokerage}). The dashboard filter scopes to one group at a time; **"View as combined portfolio"** merges *that group's* member portfolios into a synthetic entity (quantity-summed positions, weighted-average cost basis) but doesn't double-count anything. `db.add_to_group` is idempotent. Deleting a group removes its memberships; member portfolios themselves are untouched.
+
+!!! info "Combined view: position merge, not metric average"
+    When the user toggles "View as combined portfolio", daily portfolio metrics for the synthetic entity are derived by summing per-day `total_value` across members and re-computing `daily_return`, `cum_return`, `drawdown`, `rolling_vol_21d` from the merged value series — **not** by averaging the members' pre-computed metrics, which would mis-weight portfolios of different sizes.
+
 !!! info "Schema migration is automatic"
     `Database._init_store()` backfills missing columns with defaults from `_MIGRATION_DEFAULTS`. To add a new column:
     1. Declare it in the schema dict.

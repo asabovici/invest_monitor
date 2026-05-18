@@ -1,5 +1,6 @@
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -453,6 +454,60 @@ with st.sidebar:
                 st.success(f"Created '{nm}'. Add positions in the Trade Blotter tab.")
                 st.rerun()
 
+    # Portfolio groups — tag portfolios so they can be filtered together on
+    # the Multi-Portfolio Dashboard (e.g. Taxable, Tax-Free, Retirement).
+    with st.expander("🏷 Portfolio Groups"):
+        _gdb = get_db()
+        _all_pfs = _gdb.list_portfolios()
+        existing_groups = _gdb.list_groups()
+
+        # Create a new group
+        st.markdown("**Create / update**")
+        new_g_name = st.text_input(
+            "Group name", placeholder="e.g. Tax-Free",
+            key="group_new_name",
+        )
+        new_g_desc = st.text_input(
+            "Description (optional)", placeholder="e.g. Roth + HSA + 401k",
+            key="group_new_desc",
+        )
+        if st.button("Create group", key="group_create_btn"):
+            nm = new_g_name.strip()
+            if not nm:
+                st.error("Group name is required.")
+            else:
+                _gdb.create_group(nm, description=new_g_desc.strip())
+                st.success(f"Group '{nm}' saved. Add members below.")
+                st.rerun()
+
+        if existing_groups:
+            st.markdown("---")
+            st.markdown("**Manage memberships**")
+            sel_group = st.selectbox(
+                "Select group", existing_groups, key="group_manage_select",
+            )
+            current_members = _gdb.get_group_members(sel_group)
+            new_members = st.multiselect(
+                "Members", _all_pfs, default=current_members,
+                key=f"group_members_{sel_group}",
+            )
+            col_save, col_del = st.columns(2)
+            with col_save:
+                if st.button("Save members", key=f"group_save_{sel_group}"):
+                    _gdb.set_group_members(sel_group, new_members)
+                    st.success(
+                        f"Group '{sel_group}' has {len(new_members)} portfolio(s)."
+                    )
+                    st.rerun()
+            with col_del:
+                if st.button("Delete group", key=f"group_del_{sel_group}",
+                             type="secondary"):
+                    _gdb.delete_group(sel_group)
+                    st.success(f"Deleted group '{sel_group}'.")
+                    st.rerun()
+        else:
+            st.caption("No groups yet. Create one above to start filtering the dashboard.")
+
     # Always-visible data action: works regardless of whether a portfolio is loaded.
     if st.button(
         "Refresh metrics",
@@ -475,7 +530,11 @@ with st.sidebar:
 
     if "portfolio" in st.session_state:
         p: Portfolio = st.session_state["portfolio"]
-        st.markdown(f"**Active:** {p.name} ({len(p.positions)} positions)")
+        _active_groups = get_db().get_groups_for_portfolio(p.name)
+        st.markdown(
+            f"**Active:** {p.name} ({len(p.positions)} positions)"
+            + (f"  \n🏷 {', '.join(_active_groups)}" if _active_groups else "")
+        )
         st.markdown("---")
 
         period = st.selectbox("Price history period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
@@ -499,10 +558,71 @@ with st.sidebar:
 if view == "Multi-Portfolio Dashboard":
     st.title("Multi-Portfolio Dashboard")
 
-    portfolio_names = get_db().list_portfolios()
-    if not portfolio_names:
+    all_portfolio_names = get_db().list_portfolios()
+    if not all_portfolio_names:
         st.info("No portfolios found. Import a portfolio CSV in the sidebar.")
         st.stop()
+
+    # ── Group filter ──────────────────────────────────────────────────────────
+    # If groups exist, let the user scope every section of the dashboard to a
+    # single group (e.g. "Taxable" or "Tax-Free"). "All portfolios" is the
+    # default and matches pre-groups behaviour. Filtering portfolio_names here
+    # cascades to every downstream section since they all derive from it.
+    _all_groups = get_db().list_groups()
+    # Default: not in combined mode. Flipped on below when the user picks a
+    # group AND toggles "View as combined portfolio".
+    combined_view = False
+    combined_name: Optional[str] = None
+    combined_members: list[str] = []
+    if _all_groups:
+        ALL_OPTION = "All portfolios"
+        col_grp, col_combined = st.columns([3, 2])
+        with col_grp:
+            group_choice = st.selectbox(
+                "Group filter",
+                [ALL_OPTION] + _all_groups,
+                key="dashboard_group_filter",
+                help=(
+                    "Scope every section below — KPIs, exposure, summary, "
+                    "attribution, wealth projection — to the portfolios in this "
+                    "group. Manage groups via the **🏷 Portfolio Groups** "
+                    "expander in the sidebar."
+                ),
+            )
+        if group_choice != ALL_OPTION:
+            members = set(get_db().get_group_members(group_choice))
+            portfolio_names = [p for p in all_portfolio_names if p in members]
+            if not portfolio_names:
+                st.warning(
+                    f"Group **{group_choice}** has no portfolios assigned. "
+                    "Add some in the sidebar's **🏷 Portfolio Groups** expander."
+                )
+                st.stop()
+            with col_combined:
+                combined_view = st.toggle(
+                    "View as combined portfolio",
+                    value=False, key="dashboard_combined_view",
+                    help=(
+                        "Merge this group's member portfolios into one "
+                        "synthetic portfolio. Positions in the same ticker are "
+                        "quantity-summed with a weighted-average cost basis. "
+                        "Useful for comparing the whole group against benchmarks."
+                    ),
+                )
+            desc = get_db().get_group_description(group_choice)
+            st.caption(
+                f"Showing **{group_choice}** ({len(portfolio_names)} of "
+                f"{len(all_portfolio_names)} portfolios)"
+                + (f" — {desc}" if desc else "")
+                + (" — *combined view*" if combined_view else "")
+            )
+            if combined_view:
+                combined_members = list(portfolio_names)
+                combined_name = f"{group_choice} (combined)"
+        else:
+            portfolio_names = all_portfolio_names
+    else:
+        portfolio_names = all_portfolio_names
 
     HORIZONS = ["1M", "3M", "6M", "1Y"]
     CONFIDENCE_LEVELS = [("95%", "var_95"), ("99%", "var_99")]
@@ -518,6 +638,40 @@ if view == "Multi-Portfolio Dashboard":
             all_tickers.update(pos.asset.ticker for pos in portfolios_by_name[n].positions)
         except Exception:
             continue
+
+    # ── Combined-portfolio synthesis ──────────────────────────────────────────
+    # When the user toggled "View as combined portfolio" on a group, replace
+    # the per-portfolio dict with a single synthetic entity that merges every
+    # member's positions. Quantities for the same ticker are summed; cost basis
+    # is the weighted average. Every downstream section reads from
+    # portfolios_by_name, so they all transparently switch to the merged view.
+    if combined_view and combined_members and combined_name:
+        merged_positions: dict[str, Position] = {}
+        for member_name in combined_members:
+            p = portfolios_by_name.get(member_name)
+            if p is None:
+                continue
+            for pos in p.positions:
+                t = pos.asset.ticker
+                if t in merged_positions:
+                    e = merged_positions[t]
+                    new_qty = e.quantity + pos.quantity
+                    new_cb = (
+                        (e.quantity * e.cost_basis + pos.quantity * pos.cost_basis) / new_qty
+                        if new_qty > 0 else e.cost_basis
+                    )
+                    merged_positions[t] = Position(
+                        asset=e.asset, quantity=new_qty, cost_basis=new_cb,
+                    )
+                else:
+                    merged_positions[t] = pos
+        combined_portfolio = Portfolio(
+            name=combined_name, positions=list(merged_positions.values()),
+        )
+        portfolios_by_name = {combined_name: combined_portfolio}
+        portfolio_names = [combined_name]
+        all_tickers = {pos.asset.ticker for pos in combined_portfolio.positions}
+
     latest = latest_prices(list(all_tickers)) if all_tickers else {}
 
     def _market_value(pf: Portfolio) -> float:
@@ -906,6 +1060,38 @@ if view == "Multi-Portfolio Dashboard":
 
     _attr_db = get_db()
     port_metrics_all = _attr_db.get_daily_portfolio_metrics()
+    # Scope the persisted metrics to the active portfolio set. In combined
+    # view, aggregate member portfolios into a synthetic series by summing
+    # daily total_value across members and re-deriving daily_return /
+    # cum_return / drawdown / rolling vol from the merged value series.
+    if not port_metrics_all.empty:
+        if combined_view and combined_members and combined_name:
+            pm = port_metrics_all[
+                port_metrics_all["portfolio_name"].isin(combined_members)
+            ].copy()
+            pm["date"] = pd.to_datetime(pm["date"])
+            if not pm.empty:
+                agg = (
+                    pm.groupby("date", as_index=False)["total_value"].sum()
+                    .sort_values("date").reset_index(drop=True)
+                )
+                agg["portfolio_name"]  = combined_name
+                agg["daily_return"]    = agg["total_value"].pct_change()
+                first_v = float(agg["total_value"].iloc[0]) if len(agg) else 0.0
+                agg["cum_return"]      = (agg["total_value"] / first_v - 1.0) if first_v > 0 else np.nan
+                agg["rolling_vol_21d"] = agg["daily_return"].rolling(21).std() * np.sqrt(252.0)
+                cum_value = agg["total_value"]
+                cummax    = cum_value.cummax()
+                agg["drawdown"]     = (cum_value - cummax) / cummax
+                agg["max_drawdown"] = agg["drawdown"].cummin()
+                port_metrics_all = agg
+            else:
+                port_metrics_all = pm  # empty
+        else:
+            port_metrics_all = port_metrics_all[
+                port_metrics_all["portfolio_name"].isin(portfolio_names)
+            ]
+
     if port_metrics_all.empty:
         st.info(
             "No daily metrics stored yet. Use **Refresh metrics** in the sidebar "
@@ -1042,8 +1228,16 @@ if view == "Multi-Portfolio Dashboard":
                 st.markdown(f"**vs {primary_bench} (period return delta)**")
                 st.dataframe(pd.DataFrame(delta_rows), use_container_width=True, hide_index=True)
 
-        # Attribution: top contributors / detractors in the window
+        # Attribution: top contributors / detractors in the window.
+        # Scope to the active portfolio set, and in combined view re-label
+        # every member row so the table aggregates across them.
         attr_all = _attr_db.get_daily_attribution(start_date=cutoff.strftime("%Y-%m-%d"))
+        if not attr_all.empty:
+            if combined_view and combined_members and combined_name:
+                attr_all = attr_all[attr_all["portfolio_name"].isin(combined_members)].copy()
+                attr_all["portfolio_name"] = combined_name
+            else:
+                attr_all = attr_all[attr_all["portfolio_name"].isin(portfolio_names)]
         if not attr_all.empty:
             attr_all["date"] = pd.to_datetime(attr_all["date"])
             sum_contrib = (
@@ -1986,6 +2180,41 @@ with tab_overview:
     st.header(portfolio.name)
 
     cur_prices = latest_prices(tickers)
+
+    # ── Quick-edit group memberships ───────────────────────────────────────────
+    _ov_db = get_db()
+    _ov_all_groups = _ov_db.list_groups()
+    if _ov_all_groups:
+        _ov_current = _ov_db.get_groups_for_portfolio(portfolio.name)
+        col_g, col_save = st.columns([5, 1])
+        with col_g:
+            _ov_picked = st.multiselect(
+                "🏷 Groups",
+                options=_ov_all_groups,
+                default=_ov_current,
+                key=f"overview_groups_{portfolio.name}",
+                help=(
+                    "Tag this portfolio with one or more groups. The "
+                    "Multi-Portfolio Dashboard's Group filter then scopes every "
+                    "section to a group, and the **View as combined portfolio** "
+                    "toggle merges the group's members into one synthetic entity."
+                ),
+            )
+        with col_save:
+            st.write("")  # vertical alignment with the multiselect
+            if set(_ov_picked) != set(_ov_current):
+                if st.button("Save groups", key="overview_save_groups", type="primary"):
+                    _ov_db.set_groups_for_portfolio(portfolio.name, _ov_picked)
+                    st.success(
+                        f"Groups for **{portfolio.name}**: "
+                        f"{', '.join(_ov_picked) if _ov_picked else '— none —'}"
+                    )
+                    st.rerun()
+    else:
+        st.caption(
+            "💡 No portfolio groups yet — create one in the sidebar's "
+            "**🏷 Portfolio Groups** expander to start grouping accounts."
+        )
 
     if not portfolio.positions:
         st.info("No positions yet. Add some via the **📋 Trades** tab.")

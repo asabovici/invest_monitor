@@ -84,6 +84,7 @@ nav:
   - Getting Started: getting-started.md
   - Dashboard:
     - Overview: dashboard.md
+    - Portfolio Groups: portfolio-groups.md
     - Lookthrough: lookthrough.md
     - Income & SWR: income-and-swr.md
     - Performance Attribution: performance-attribution.md

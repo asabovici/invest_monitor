@@ -14,6 +14,7 @@ A personal investment portfolio monitoring tool with risk analytics, ETF lookthr
 - **Performance attribution** — daily security-, portfolio-, and contribution-level metrics persisted to Parquet; cumulative-return + drawdown charts, top contributors/detractors per period, and stacked contribution by asset type over time. **Trade replay (v2)** reconstructs historical positions from the BUY/SELL ledger when trades are recorded; portfolios without trades fall back to a static-current-positions view.
 - **Wealth projection** — deterministic multi-period growth **or** Monte Carlo with cross-asset correlation matrix and historical-regime presets (1970s Stagflation, 1980s Bull Run, 1990s Japan Deflation, 2000s Dual Shock, 2010s Recovery, 2020s Rate-Hike Era). Optional **Safe Withdrawal Rate** layer (Bengen-style, with inflation adjustment) — toggle on, set a primary SWR%, and in MC mode compare survival across multiple rates against the same return paths to find the highest SWR that meets your survival threshold.
 - **Benchmark portfolios** — eight built-in named recipes (60/40, All Seasons / Dalio, Golden Butterfly, Permanent Portfolio / Browne, Risk Parity, 3-Fund Bogle, Coffeehouse / Schultheis, Larry Portfolio / Swedroe) constructed from public ETF proxies. Overlay on the Performance Attribution cumulative-return chart and get an apples-to-apples delta vs each portfolio over the selected window
+- **Portfolio groups** — many-to-many tagging (e.g. *Taxable*, *Tax-Free*, *Retirement*). Filter the Multi-Portfolio Dashboard to a group, or flip **"View as combined portfolio"** to merge the group's member portfolios into a single synthetic entity (quantity-summed, weighted-average cost basis) for benchmark comparison and projection
 - **Demo mode** — sidebar toggle (or CLI) that switches to a separate `data_demo/` dataset with sample portfolios, so you can screenshot/share without exposing live accounts
 - **Analytics & return production** — scheduled jobs that keep prices, attribution metrics, sector betas, and fund profiles fresh. Run on demand from the dashboard's **⚙️ Production** view, or wire `invest-monitor production run` into cron / systemd for true automation. Run log + an **Issues** tab surfaces any failures.
 - **Streamlit dashboard** — interactive UI across nine tabs per portfolio plus a multi-portfolio dashboard with embedded **agent chat**
@@ -65,6 +66,8 @@ invest_monitor/
     ├── daily_attribution.parquet       # per (date, portfolio, ticker) contribution
     ├── production_jobs.parquet         # scheduled-job config + last-run status
     ├── production_runs.parquet         # append-only production run log
+    ├── groups.parquet                  # portfolio group registry
+    ├── portfolio_groups.parquet        # many-to-many group ↔ portfolio
     └── prices/{TICKER}.parquet         # daily close prices
 ```
 
@@ -126,6 +129,14 @@ invest-monitor production schedule list                # timer status per job
 invest-monitor production schedule install refresh_attribution
 invest-monitor production schedule install collect_prices --interval 720  # override (min)
 invest-monitor production schedule uninstall refresh_attribution
+
+# ── Portfolio groups (Taxable, Tax-Free, Retirement, ...) ─────────────────
+invest-monitor group list                              # all groups + members
+invest-monitor group create "Tax-Free" --description "Roth + HSA + 401k"
+invest-monitor group add "Tax-Free" "PRU401K"
+invest-monitor group remove "Tax-Free" "PRU401K"
+invest-monitor group show "SCHAB"                      # which groups it's in
+invest-monitor group delete "Tax-Free"
 
 # ── Benchmark portfolios ───────────────────────────────────────────────────
 invest-monitor benchmarks list                         # table per benchmark + weights
@@ -253,6 +264,8 @@ All data stored as Parquet files under `data/` (gitignored). Demo data lives in 
 | `daily_attribution.parquet` | Brinson decomposition: date, portfolio_name, ticker, weight, position_return, contribution_to_return, asset_type, sector |
 | `production_jobs.parquet` | Scheduled-job config + last-run state: job_name, enabled, interval_minutes, last_run_at, last_status, last_error, last_duration_seconds |
 | `production_runs.parquet` | Append-only run log: run_id, job_name, started_at, ended_at, status, error_message, details, duration_seconds |
+| `groups.parquet` | Portfolio group registry: name, description, created_at |
+| `portfolio_groups.parquet` | Many-to-many group ↔ portfolio: group_name, portfolio_name |
 | `prices/<TICKER>.parquet` | Per-ticker daily closing prices indexed by date |
 
 The `daily_*.parquet` files are populated by the **Refresh metrics** button (or `invest-monitor metrics refresh`). Refresh is incremental by default — only dates newer than the latest stored date (plus a 30-day re-walk for safety against late price corrections) are recomputed. Use `--full` to recompute the entire history.
@@ -269,6 +282,35 @@ The `daily_*.parquet` files are populated by the **Refresh metrics** button (or 
 Auto-routing is per-portfolio: a brokerage portfolio with full trade history gets v2, an old CSV-imported one in the same database gets v1. The Refresh-metrics success message lists which mode each portfolio used. The dashboard caption under **Performance Attribution** also documents the active behavior.
 
 To upgrade a v1 portfolio to v2: record its historical trades in the **📋 Trades** tab (or via the future trade-import CSV), then click **Refresh metrics**. Until you do, the v1 view is shown.
+
+## Portfolio groups
+
+Many-to-many tagging: a portfolio (e.g. SCHAB) can simultaneously belong to **Taxable** *and* **Brokerage**, while PRU401K belongs to **Tax-Free** and **Retirement**.
+
+### Manage groups
+
+Two equivalent surfaces:
+
+- **Sidebar** → **🏷 Portfolio Groups** expander — create + name + describe groups, edit memberships via a multiselect, delete groups (member portfolios are untouched).
+- **Single Portfolio → 📊 Overview tab** → a `🏷 Groups` multiselect lets you tag/untag the active portfolio without leaving the page. The sidebar's Active line shows current memberships as badges.
+- **CLI** — `invest-monitor group create / list / add / remove / delete / show`.
+
+### Group filter on the Multi-Portfolio Dashboard
+
+When at least one group exists, a **Group filter** selectbox appears at the top of the dashboard. Selecting a group scopes **every** section below — KPI strip, Aggregate Exposure, Summary, Performance Attribution, Wealth Projection, Income Projection — to the portfolios in that group.
+
+### View as combined portfolio
+
+When a group is filtered, a **"View as combined portfolio"** toggle appears next to the filter. Flipping it on merges the group's member portfolios into a single synthetic entity named `"{group} (combined)"`:
+
+- Positions in the same ticker across member portfolios are **quantity-summed**.
+- Cost basis becomes the **weighted average** (`Σ qty_i × cb_i / Σ qty_i`).
+- The merged portfolio is fed to every downstream section, so the Summary table collapses to one row, the Performance Attribution chart shows one cumulative-return line, and the Wealth Projection runs one fan instead of one per member portfolio.
+- For the Performance Attribution time series, the daily metrics across members are aggregated by **summing `total_value` per date** and re-deriving `daily_return / cum_return / drawdown / rolling_vol_21d` from the merged value series.
+
+This is the killer combo with **[Benchmarks](#benchmark-portfolios)**: filter to *Tax-Free*, flip "View as combined portfolio", overlay 60/40 — and you can see how your aggregate tax-free pot is performing vs the classic benchmark.
+
+Dollar totals are invariant under combination: `Σ(member total_cost) = combined total_cost`, similarly for current value and market value.
 
 ## Benchmark portfolios
 

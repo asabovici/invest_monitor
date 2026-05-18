@@ -17,6 +17,8 @@ DAILY_PORTFOLIO_METRICS_FILE  = "daily_portfolio_metrics.parquet"
 DAILY_ATTRIBUTION_FILE        = "daily_attribution.parquet"
 PRODUCTION_JOBS_FILE          = "production_jobs.parquet"
 PRODUCTION_RUNS_FILE          = "production_runs.parquet"
+GROUPS_FILE                   = "groups.parquet"
+PORTFOLIO_GROUPS_FILE         = "portfolio_groups.parquet"
 PRICES_DIR = "prices"
 
 
@@ -59,6 +61,8 @@ class Database:
                 "run_id", "job_name", "started_at", "ended_at",
                 "status", "error_message", "details", "duration_seconds",
             ],
+            self._groups_path():            ["name", "description", "created_at"],
+            self._portfolio_groups_path():  ["group_name", "portfolio_name"],
         }
         for path, columns in defaults.items():
             if not os.path.exists(path):
@@ -112,6 +116,12 @@ class Database:
 
     def _production_runs_path(self) -> str:
         return os.path.join(self.data_dir, PRODUCTION_RUNS_FILE)
+
+    def _groups_path(self) -> str:
+        return os.path.join(self.data_dir, GROUPS_FILE)
+
+    def _portfolio_groups_path(self) -> str:
+        return os.path.join(self.data_dir, PORTFOLIO_GROUPS_FILE)
 
     def _prices_path(self, ticker: str) -> str:
         return os.path.join(self.data_dir, PRICES_DIR, f"{ticker}.parquet")
@@ -716,6 +726,106 @@ class Database:
         }])
         pd.concat([df, row], ignore_index=True).to_parquet(self._production_runs_path(), index=False)
         return run_id
+
+    # ── Portfolio groups (many-to-many tagging) ───────────────────────────────
+
+    def list_groups(self) -> List[str]:
+        """Return all group names, sorted alphabetically."""
+        df = pd.read_parquet(self._groups_path())
+        if df.empty:
+            return []
+        return sorted(df["name"].dropna().tolist())
+
+    def get_group_description(self, name: str) -> Optional[str]:
+        df = pd.read_parquet(self._groups_path())
+        match = df[df["name"] == name]
+        if match.empty:
+            return None
+        v = match.iloc[0].get("description")
+        return None if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+
+    def create_group(self, name: str, description: str = "") -> None:
+        """Upsert a group. Idempotent — re-creating preserves the original
+        `created_at` and just updates the description."""
+        df = pd.read_parquet(self._groups_path())
+        existing_at = None
+        if not df.empty and name in df["name"].values:
+            existing_at = df.loc[df["name"] == name, "created_at"].iloc[0]
+            df = df[df["name"] != name]
+        row = pd.DataFrame([{
+            "name":        name,
+            "description": description,
+            "created_at":  existing_at or pd.Timestamp.now().isoformat(),
+        }])
+        pd.concat([df, row], ignore_index=True).to_parquet(
+            self._groups_path(), index=False
+        )
+
+    def delete_group(self, name: str) -> None:
+        """Remove a group and clear all its memberships."""
+        df = pd.read_parquet(self._groups_path())
+        df[df["name"] != name].to_parquet(self._groups_path(), index=False)
+        mem = pd.read_parquet(self._portfolio_groups_path())
+        mem[mem["group_name"] != name].to_parquet(
+            self._portfolio_groups_path(), index=False
+        )
+
+    def get_group_members(self, group_name: str) -> List[str]:
+        """Return portfolio names that belong to this group, sorted."""
+        mem = pd.read_parquet(self._portfolio_groups_path())
+        if mem.empty:
+            return []
+        return sorted(mem.loc[mem["group_name"] == group_name, "portfolio_name"].tolist())
+
+    def get_groups_for_portfolio(self, portfolio_name: str) -> List[str]:
+        """Return groups that this portfolio belongs to, sorted."""
+        mem = pd.read_parquet(self._portfolio_groups_path())
+        if mem.empty:
+            return []
+        return sorted(mem.loc[mem["portfolio_name"] == portfolio_name, "group_name"].tolist())
+
+    def add_to_group(self, group_name: str, portfolio_name: str) -> None:
+        """Idempotent — adding the same (group, portfolio) twice is a no-op."""
+        mem = pd.read_parquet(self._portfolio_groups_path())
+        already = (
+            not mem.empty
+            and ((mem["group_name"] == group_name) & (mem["portfolio_name"] == portfolio_name)).any()
+        )
+        if already:
+            return
+        row = pd.DataFrame([{"group_name": group_name, "portfolio_name": portfolio_name}])
+        pd.concat([mem, row], ignore_index=True).to_parquet(
+            self._portfolio_groups_path(), index=False
+        )
+
+    def remove_from_group(self, group_name: str, portfolio_name: str) -> None:
+        mem = pd.read_parquet(self._portfolio_groups_path())
+        mem[~((mem["group_name"] == group_name) & (mem["portfolio_name"] == portfolio_name))
+            ].to_parquet(self._portfolio_groups_path(), index=False)
+
+    def set_group_members(self, group_name: str, portfolio_names: List[str]) -> None:
+        """Replace the membership list for a group atomically."""
+        mem = pd.read_parquet(self._portfolio_groups_path())
+        kept = mem[mem["group_name"] != group_name]
+        new = pd.DataFrame([
+            {"group_name": group_name, "portfolio_name": p} for p in portfolio_names
+        ])
+        pd.concat([kept, new], ignore_index=True).to_parquet(
+            self._portfolio_groups_path(), index=False
+        )
+
+    def set_groups_for_portfolio(self, portfolio_name: str, group_names: List[str]) -> None:
+        """Replace the group memberships for a single portfolio atomically.
+        Mirror of `set_group_members` but keyed on the portfolio side — used by
+        the per-portfolio quick-edit UI."""
+        mem = pd.read_parquet(self._portfolio_groups_path())
+        kept = mem[mem["portfolio_name"] != portfolio_name]
+        new = pd.DataFrame([
+            {"group_name": g, "portfolio_name": portfolio_name} for g in group_names
+        ])
+        pd.concat([kept, new], ignore_index=True).to_parquet(
+            self._portfolio_groups_path(), index=False
+        )
 
     def get_production_runs(
         self,

@@ -45,6 +45,16 @@ In **Performance Attribution**:
 3. **Benchmark stats over the same window** table — one row per selected benchmark with Period Return, Annualised Vol, Max Drawdown, proxy count.
 4. **vs {primary benchmark}** delta table — for each portfolio: Period Return + `(portfolio return − primary benchmark return)`. The primary benchmark is whichever you picked first in the multiselect.
 
+!!! tip "Pairing benchmarks with portfolio groups"
+    [Portfolio Groups](portfolio-groups.md) + benchmarks = the killer "how am I doing" workflow:
+    
+    1. Group your accounts (e.g. *Tax-Free* = Roth + HSA + 401k).
+    2. Filter the dashboard to that group.
+    3. Flip **"View as combined portfolio"** to merge them into one synthetic entity.
+    4. Overlay benchmarks here.
+    
+    You'll see one cumulative-return line for your aggregate tax-free pot vs the benchmarks, with a vs-benchmark delta table — instead of one line per account.
+
 !!! tip "Pairing benchmarks with regime presets"
     The [Wealth Projection](wealth-projection.md) section's MC has historical regime presets. Combine them — e.g. flip the preset to "2000s Dual Shock" and see how the All Seasons benchmark would have fared in that decade vs your portfolio's MC distribution.
 
