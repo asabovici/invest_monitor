@@ -6,7 +6,13 @@ from src.database import Database
 from src.collector import Collector
 from src.data.ingestion import Ingester
 from src.reporting import ReportingEngine
-from src.agent import RiskAgent, WealthAgent, ResearchAgent
+from src.agent import (
+    CIOAgent,
+    PortfolioManagerAgent,
+    ResearchAgent,
+    RiskAgent,
+    WealthAgent,
+)
 
 
 @click.group()
@@ -517,6 +523,64 @@ def research(portfolio_name, query):
       invest-monitor research --portfolio "My Portfolio" --query "Find me bond ETFs that reduce my overall drawdown"
     """
     agent_instance = ResearchAgent()
+
+    if query:
+        full_query = (
+            f"Regarding the '{portfolio_name}' portfolio: {query}"
+            if portfolio_name else query
+        )
+        click.echo(agent_instance.run_query(full_query))
+    else:
+        agent_instance.run_interactive(initial_portfolio=portfolio_name)
+
+
+@cli.command()
+@click.option("--portfolio", "portfolio_name", default=None,
+              help="Open with a snapshot of this portfolio's positions.")
+@click.option("--query", default=None,
+              help="Run a single query and exit (non-interactive).")
+def pm(portfolio_name, query):
+    """Chat with the Portfolio Manager agent powered by Claude Opus 4.6.
+
+    Builds and refines concrete trade proposals: target allocations,
+    BUY/SELL orders with dollar amounts and share counts, sector-tilt
+    projections, and a structured proposal record for hand-off to the CIO.
+
+    Examples:\n
+      invest-monitor pm --portfolio "My Portfolio"\n
+      invest-monitor pm --query "Propose a 60/40 deployment of $50k into BND and VTI"\n
+      invest-monitor pm --portfolio "My Portfolio" --query "Rebalance to equal-weight across all current holdings"
+    """
+    agent_instance = PortfolioManagerAgent()
+
+    if query:
+        full_query = (
+            f"Regarding the '{portfolio_name}' portfolio: {query}"
+            if portfolio_name else query
+        )
+        click.echo(agent_instance.run_query(full_query))
+    else:
+        agent_instance.run_interactive(initial_portfolio=portfolio_name)
+
+
+@cli.command()
+@click.option("--portfolio", "portfolio_name", default=None,
+              help="Open with a holistic CIO view of this portfolio.")
+@click.option("--query", default=None,
+              help="Run a single query and exit (non-interactive).")
+def cio(portfolio_name, query):
+    """Chat with the CIO agent powered by Claude Opus 4.6.
+
+    Holistic oversight: reviews proposals against firm-level concentration
+    and sector caps, and produces a structured decision — approve,
+    override, or request more research.
+
+    Examples:\n
+      invest-monitor cio --portfolio "My Portfolio"\n
+      invest-monitor cio --query "Review this proposal: deploy $25k as {AAPL: 0.5, MSFT: 0.5}"\n
+      invest-monitor cio --portfolio "My Portfolio" --query "What's our biggest concentration risk right now?"
+    """
+    agent_instance = CIOAgent()
 
     if query:
         full_query = (
