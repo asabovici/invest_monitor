@@ -1,6 +1,20 @@
 # Agents
 
-invest-monitor ships two conversational agents, both powered by **Claude Opus 4.6 with adaptive thinking** and the Anthropic beta tool runner. Each agent maintains multi-turn conversation history so follow-up questions work without repeating context.
+invest-monitor ships three conversational agents — **Risk**, **Wealth**, and **Research** — all powered by **Claude Opus 4.6 with adaptive thinking** and the Anthropic beta tool runner. Each agent maintains multi-turn conversation history so follow-up questions work without repeating context.
+
+You can talk to them three ways:
+1. **CLI** — `invest-monitor agent`, `invest-monitor wealth`, `invest-monitor research`.
+2. **Streamlit dashboard** — embedded chat panel at the bottom of the Multi-Portfolio Dashboard under **🤖 Ask the Agents**, with a tab per agent. Each tab keeps its own history and is scoped to the active data dir (live vs demo).
+3. **Programmatic** — `from src.agent import RiskAgent, WealthAgent, ResearchAgent` (see end of file).
+
+All three read `ANTHROPIC_API_KEY` from the environment. The simplest way is a project-local `.env` file (auto-loaded via `src/env.py`):
+
+```bash
+cp .env.example .env
+# paste your key after ANTHROPIC_API_KEY=
+```
+
+Restart Streamlit / the CLI after editing `.env` — `load_dotenv()` runs at module import time.
 
 ---
 
@@ -105,7 +119,7 @@ uv run invest-monitor agent --portfolio "My Portfolio" --query "How correlated a
 **CLI:** `invest-monitor wealth`
 **Skills file:** `src/agent/wealth_skills.py`
 
-Focused on growing and preserving wealth: current P&L, goal planning, rebalancing, portfolio optimisation, and tax efficiency. Deliberately avoids duplicating the risk agent's metrics.
+Focused on growing and preserving wealth: current P&L, goal planning, rebalancing, portfolio optimisation, tax efficiency, and **scenario analysis** (named-scenario phases + cross-asset beta-implied shocks for an MC projection). Deliberately avoids duplicating the risk agent's metrics.
 
 ### CLI usage
 
@@ -122,7 +136,7 @@ uv run invest-monitor wealth --portfolio "My Portfolio" --query "Optimise my all
 uv run invest-monitor wealth --portfolio "My Portfolio" --query "Should I rebalance to 60/40?"
 ```
 
-### Skills (9 total)
+### Skills (11 total)
 
 #### Portfolio value & returns
 
@@ -151,6 +165,13 @@ uv run invest-monitor wealth --portfolio "My Portfolio" --query "Should I rebala
 | Skill | Description |
 |---|---|
 | `run_goal_projection(goal_amount, years, monthly_contribution=0, num_simulations=5000)` | Monte Carlo projection of whether the portfolio reaches a target value by a deadline, with optional ongoing contributions. Returns probability of success, expected value, and P10/P25/P50/P75/P90 outcomes. |
+
+#### Scenario analysis
+
+| Skill | Description |
+|---|---|
+| `list_scenarios` | Lists all named MC scenarios from `src/scenarios.py:SCENARIOS` (`base`, `market_crash`, `mild_correction`, `prolonged_low_growth`, `stagflation`, `bull_run`, `flash_crash_recovery`, `double_dip`, `rate_shock`) along with their phase structure, plus the `CROSS_ASSET_BETAS` table. |
+| `run_scenario_analysis(portfolio_name, scenario_name="base", goal_amount?, years?, monthly_contribution?, shocked_asset_class?, shock_return_pct?)` | Scenario-aware Monte Carlo. Combines (a) named-scenario phases that modify daily μ/σ per trading day and apply one-time shocks, and (b) cross-asset beta-implied shocks (specify one asset class + its shock, every other class gets `beta × shock`). Returns P5–P95 percentiles, goal probability, and per-class shock breakdown. |
 
 #### Tax efficiency
 

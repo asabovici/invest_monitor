@@ -14,6 +14,7 @@ from scipy.optimize import minimize
 
 from src.database import Database
 from src.reporting import ReportingEngine
+from src.scenarios import SCENARIOS, CROSS_ASSET_BETAS
 
 
 def create_wealth_skills(db: Database, engine: ReportingEngine) -> List:
@@ -605,6 +606,255 @@ def create_wealth_skills(db: Database, engine: ReportingEngine) -> List:
             ),
         }, indent=2)
 
+    @beta_tool
+    def list_scenarios() -> str:
+        """List all available named scenarios that can be used with
+        run_scenario_analysis, along with their descriptions and phase structure."""
+        rows = []
+        for key, scenario in SCENARIOS.items():
+            phases = [
+                {
+                    "phase": p.name,
+                    "duration": "remainder" if p.duration_days >= 1_000_000 else f"{p.duration_days} trading days",
+                    "return_multiplier": p.return_multiplier,
+                    "vol_multiplier": p.vol_multiplier,
+                    "one_time_shock_pct": round(p.one_time_shock * 100, 1) if p.one_time_shock else None,
+                }
+                for p in scenario.phases
+            ]
+            rows.append({
+                "scenario": key,
+                "description": scenario.description,
+                "phases": phases,
+            })
+        return json.dumps({
+            "available_scenarios": rows,
+            "cross_asset_betas": CROSS_ASSET_BETAS,
+            "note": (
+                "Use scenario names with run_scenario_analysis. "
+                "Cross-asset betas show sensitivity to a 1-unit equity shock — "
+                "used when shocked_asset_class is specified."
+            ),
+        }, indent=2)
+
+    @beta_tool
+    def run_scenario_analysis(
+        portfolio_name: str,
+        scenario_name: str,
+        years: float,
+        monthly_contribution: float = 0.0,
+        goal_amount: float = 0.0,
+        shocked_asset_class: str = "",
+        shock_return_pct: float = 0.0,
+        num_simulations: int = 5000,
+    ) -> str:
+        """Project portfolio growth under a named stress scenario with optional
+        per-asset-class shocks propagated to the rest of the portfolio via
+        historical cross-asset betas.
+
+        Named scenarios model complex multi-phase market environments (crashes,
+        prolonged low growth, stagflation, bull runs, etc.).  Use list_scenarios
+        to see all available options.
+
+        Beta-implied shocks: specify shocked_asset_class (e.g. "Stock") and
+        shock_return_pct (e.g. -40 for a -40% annual return shock).  The engine
+        computes implied shocks for every other asset class using CROSS_ASSET_BETAS
+        and aggregates them to a portfolio-level daily drift adjustment.  This can
+        be used alone (scenario_name="base") or combined with a named scenario.
+
+        Args:
+            portfolio_name: Name of the portfolio.
+            scenario_name: Named scenario to apply (e.g. "market_crash", "prolonged_low_growth").
+                           Use "base" for no scenario adjustment.
+            years: Time horizon in years.
+            monthly_contribution: Monthly cash contribution (default 0).
+            goal_amount: If > 0, compute probability of reaching this value.
+            shocked_asset_class: Asset class to apply a direct return shock to
+                (Stock, Bond, ETF, Crypto, Fund, Cash).  Leave empty for no shock.
+            shock_return_pct: Annual return shock for the shocked asset class as a
+                percentage (e.g. -40 means -40%/yr).  Shocks to other classes are
+                implied via cross-asset betas.
+            num_simulations: Monte Carlo paths (default 5000).
+        """
+        if scenario_name not in SCENARIOS:
+            available = ", ".join(SCENARIOS.keys())
+            return f"Unknown scenario '{scenario_name}'. Available: {available}"
+
+        try:
+            portfolio = db.get_portfolio(portfolio_name)
+        except ValueError as e:
+            return str(e)
+
+        tickers = [pos.asset.ticker for pos in portfolio.positions]
+        latest = _latest_prices(tickers)
+        current_value = sum(
+            pos.quantity * latest.get(pos.asset.ticker, pos.cost_basis)
+            for pos in portfolio.positions
+        )
+
+        try:
+            rets = engine.calculate_returns(tickers)
+        except Exception as e:
+            return f"Could not load return data: {e}."
+
+        if rets.empty:
+            return "No price data available. Run 'invest-monitor collect' first."
+
+        available_tickers = [t for t in tickers if t in rets.columns]
+        rets = rets[available_tickers].dropna()
+
+        weights_map = {
+            pos.asset.ticker: pos.quantity * pos.cost_basis
+            for pos in portfolio.positions
+        }
+        total_w = sum(weights_map.values())
+        w = np.array([weights_map.get(t, 0) / total_w for t in available_tickers])
+
+        port_daily = rets.values @ w
+        base_daily_mu = float(port_daily.mean())
+        base_daily_sigma = float(port_daily.std())
+
+        # ── Beta-implied shock ────────────────────────────────────────────────
+        # Compute a portfolio-level daily drift adjustment when the user shocks
+        # one asset class and wants the shocks to the rest implied by betas.
+        beta_shock_daily = 0.0
+        per_class_shocks: dict[str, float] = {}
+
+        if shocked_asset_class and shock_return_pct != 0.0:
+            if shocked_asset_class not in CROSS_ASSET_BETAS:
+                return (
+                    f"Unknown asset class '{shocked_asset_class}'. "
+                    f"Valid classes: {', '.join(CROSS_ASSET_BETAS)}."
+                )
+
+            reference_beta = CROSS_ASSET_BETAS[shocked_asset_class]
+            shock_annual = shock_return_pct / 100.0
+
+            # Implied annual shock for every asset class relative to reference
+            for cls, beta in CROSS_ASSET_BETAS.items():
+                if reference_beta != 0:
+                    per_class_shocks[cls] = shock_annual * (beta / reference_beta)
+                else:
+                    per_class_shocks[cls] = shock_annual if cls == shocked_asset_class else 0.0
+
+            # Aggregate to portfolio level using value weights
+            total_value = sum(
+                pos.quantity * latest.get(pos.asset.ticker, pos.cost_basis)
+                for pos in portfolio.positions
+            )
+            weighted_annual_shock = 0.0
+            for pos in portfolio.positions:
+                asset_class = pos.asset.asset_type.value
+                pos_value = pos.quantity * latest.get(pos.asset.ticker, pos.cost_basis)
+                weight = pos_value / total_value if total_value else 0
+                weighted_annual_shock += weight * per_class_shocks.get(asset_class, 0.0)
+
+            beta_shock_daily = weighted_annual_shock / 252.0
+
+        # ── Monte Carlo with scenario phases ─────────────────────────────────
+        scenario = SCENARIOS[scenario_name]
+        trading_days = int(years * 252)
+        monthly_days = 21
+
+        # Build phase schedule: list of (start_day, phase)
+        phase_schedule = []
+        cursor = 0
+        for phase in scenario.phases:
+            phase_schedule.append((cursor, phase))
+            cursor += phase.duration_days
+            if cursor >= trading_days:
+                break
+
+        def _get_phase(day: int):
+            """Return the phase active on the given trading day."""
+            active = phase_schedule[0][1]
+            for start, phase in phase_schedule:
+                if day >= start:
+                    active = phase
+                else:
+                    break
+            return active
+
+        # Pre-compute per-day phase parameters for efficiency
+        phase_starts = {start for start, _ in phase_schedule}
+
+        rng = np.random.default_rng(seed=42)
+        paths = np.zeros((num_simulations, trading_days + 1))
+        paths[:, 0] = current_value
+
+        for day in range(1, trading_days + 1):
+            phase = _get_phase(day - 1)
+            mu = (base_daily_mu + beta_shock_daily) * phase.return_multiplier
+            sigma = max(base_daily_sigma * phase.vol_multiplier, 1e-8)
+            daily_ret = rng.normal(mu, sigma, num_simulations)
+            paths[:, day] = paths[:, day - 1] * (1 + daily_ret)
+
+            # One-time shock on the first day of a new phase
+            if (day - 1) in phase_starts and phase.one_time_shock != 0.0:
+                paths[:, day] *= (1 + phase.one_time_shock)
+
+            # Monthly contributions
+            if monthly_days > 0 and day % monthly_days == 0:
+                paths[:, day] += monthly_contribution
+
+        final_values = paths[:, -1]
+        prob_success = float(np.mean(final_values >= goal_amount)) if goal_amount > 0 else None
+        total_contributions = monthly_contribution * years * 12
+
+        # ── Assemble result ───────────────────────────────────────────────────
+        result: dict = {
+            "portfolio": portfolio_name,
+            "scenario": scenario_name,
+            "scenario_description": scenario.description,
+            "current_value": round(current_value, 2),
+            "years": years,
+            "monthly_contribution": monthly_contribution,
+            "total_contributions": round(total_contributions, 2),
+            "num_simulations": num_simulations,
+            "expected_value_at_horizon": round(float(np.mean(final_values)), 2),
+            "percentile_outcomes": {
+                "P5":  round(float(np.percentile(final_values, 5)),  2),
+                "P10": round(float(np.percentile(final_values, 10)), 2),
+                "P25": round(float(np.percentile(final_values, 25)), 2),
+                "P50": round(float(np.percentile(final_values, 50)), 2),
+                "P75": round(float(np.percentile(final_values, 75)), 2),
+                "P90": round(float(np.percentile(final_values, 90)), 2),
+                "P95": round(float(np.percentile(final_values, 95)), 2),
+            },
+            "scenario_phases": [
+                {
+                    "phase": p.name,
+                    "duration": "remainder" if p.duration_days >= 1_000_000 else f"{p.duration_days} trading days",
+                    "return_multiplier": p.return_multiplier,
+                    "vol_multiplier": p.vol_multiplier,
+                    "one_time_shock_pct": round(p.one_time_shock * 100, 1) if p.one_time_shock else None,
+                }
+                for p in scenario.phases
+            ],
+            "base_assumptions": {
+                "historical_daily_mu_pct": round(base_daily_mu * 100, 4),
+                "historical_daily_sigma_pct": round(base_daily_sigma * 100, 4),
+                "annualised_return_pct": round(base_daily_mu * 252 * 100, 2),
+                "annualised_volatility_pct": round(base_daily_sigma * np.sqrt(252) * 100, 2),
+            },
+        }
+
+        if goal_amount > 0:
+            result["goal_amount"] = round(goal_amount, 2)
+            result["probability_of_success_pct"] = round(prob_success * 100, 1)
+
+        if shocked_asset_class and shock_return_pct != 0.0:
+            result["beta_shock"] = {
+                "shocked_asset_class": shocked_asset_class,
+                "direct_shock_pct": shock_return_pct,
+                "portfolio_weighted_annual_shock_pct": round(beta_shock_daily * 252 * 100, 2),
+                "implied_shocks_by_class": {
+                    cls: round(v * 100, 2) for cls, v in per_class_shocks.items()
+                },
+            }
+
+        return json.dumps(result, indent=2)
+
     return [
         list_portfolios,
         get_portfolio_value,
@@ -615,4 +865,6 @@ def create_wealth_skills(db: Database, engine: ReportingEngine) -> List:
         run_goal_projection,
         optimize_allocation,
         find_tax_loss_opportunities,
+        list_scenarios,
+        run_scenario_analysis,
     ]

@@ -16,11 +16,17 @@ dependencies = [
     "plotly",
     "duckdb",
     "anthropic",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
+]
+docs = [
+    "mkdocs",
+    "mkdocs-material",
+    "pymdown-extensions",
 ]
 
 [project.scripts]

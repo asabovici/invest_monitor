@@ -1,6 +1,7 @@
 import click
 from tabulate import tabulate
 
+from src import env as _env  # noqa: F401  — loads .env into os.environ
 from src.database import Database
 from src.collector import Collector
 from src.data.ingestion import Ingester
@@ -56,6 +57,18 @@ def portfolio_list():
             click.echo(f"  {name}")
 
 
+@portfolio.command("create")
+@click.argument("name")
+def portfolio_create(name):
+    """Create an empty portfolio. Add positions later via trades or CSV."""
+    from src.models import Portfolio
+    db = Database()
+    if name in db.list_portfolios():
+        raise click.ClickException(f"Portfolio '{name}' already exists.")
+    db.save_portfolio(Portfolio(name=name, positions=[]))
+    click.echo(f"Created empty portfolio '{name}'.")
+
+
 @portfolio.command("delete")
 @click.argument("name")
 def portfolio_delete(name):
@@ -63,6 +76,348 @@ def portfolio_delete(name):
     db = Database()
     db.delete_portfolio(name)
     click.echo(f"Deleted portfolio '{name}'.")
+
+
+@cli.group()
+def demo():
+    """Manage the demo dataset in data_demo/ (separate from live data/)."""
+    pass
+
+
+@demo.command("seed")
+@click.option("--reset", is_flag=True, help="Wipe data_demo/ before seeding.")
+def demo_seed(reset):
+    """Populate data_demo/ with sample portfolios for screen-sharing."""
+    from src import demo as demo_data
+    if reset:
+        demo_data.reset()
+    db = demo_data.seed()
+    click.echo(f"Seeded {demo_data.DEMO_DATA_DIR}/ → portfolios: {db.list_portfolios()}")
+
+
+@demo.command("reset")
+def demo_reset():
+    """Delete the data_demo/ directory entirely."""
+    from src import demo as demo_data
+    demo_data.reset()
+    click.echo(f"Removed {demo_data.DEMO_DATA_DIR}/.")
+
+
+@cli.group()
+def summaries():
+    """Manage stored summaries of past agent conversations."""
+    pass
+
+
+@summaries.command("list")
+@click.option("--agent", default=None,
+              help="Filter to one agent (risk / wealth / research).")
+def summaries_list(agent):
+    """Show all saved agent-conversation summaries, newest first."""
+    from src import agent_summaries
+    items = agent_summaries.list_summaries(agent=agent)
+    if not items:
+        click.echo("No summaries stored." + (f" (filter: agent={agent})" if agent else ""))
+        return
+    rows = [{
+        "key":       s["key"],
+        "agent":     s["agent"],
+        "started":   s["started_at"],
+        "msgs":      s["message_count"],
+        "preview":   (s.get("summary") or "")[:60].replace("\n", " ") + "…",
+    } for s in items]
+    click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@summaries.command("show")
+@click.argument("key")
+def summaries_show(key):
+    """Print one summary in full."""
+    from src import agent_summaries
+    s = agent_summaries.get_summary(key)
+    if s is None:
+        raise click.ClickException(f"No summary with key '{key}'.")
+    click.echo(f"agent      : {s['agent']}")
+    click.echo(f"started_at : {s['started_at']}")
+    click.echo(f"messages   : {s['message_count']}")
+    click.echo()
+    click.echo("=== SUMMARY ===")
+    click.echo(s.get("summary") or "(empty)")
+
+
+@summaries.command("delete")
+@click.argument("key")
+def summaries_delete(key):
+    """Delete a stored summary."""
+    from src import agent_summaries
+    if agent_summaries.delete_summary(key):
+        click.echo(f"Deleted '{key}'.")
+    else:
+        raise click.ClickException(f"No summary with key '{key}'.")
+
+
+@cli.group()
+def group():
+    """Manage portfolio groups (e.g. Taxable, Tax-Free, Retirement)."""
+    pass
+
+
+@group.command("list")
+def group_list():
+    """List all groups + their members."""
+    db = Database()
+    names = db.list_groups()
+    if not names:
+        click.echo("No groups defined.")
+        return
+    for name in names:
+        members = db.get_group_members(name)
+        desc = db.get_group_description(name) or ""
+        click.echo(f"\n{name}" + (f"  — {desc}" if desc else ""))
+        click.echo(f"  Members ({len(members)}): {', '.join(members) if members else '—'}")
+
+
+@group.command("create")
+@click.argument("name")
+@click.option("--description", default="", help="Optional description for the group.")
+def group_create(name, description):
+    """Create (or update the description of) a group."""
+    db = Database()
+    db.create_group(name, description=description)
+    click.echo(f"Group '{name}' ready.")
+
+
+@group.command("add")
+@click.argument("group_name")
+@click.argument("portfolio_name")
+def group_add(group_name, portfolio_name):
+    """Add a portfolio to a group."""
+    db = Database()
+    if group_name not in db.list_groups():
+        raise click.ClickException(f"Group '{group_name}' does not exist. Create it first.")
+    if portfolio_name not in db.list_portfolios():
+        raise click.ClickException(f"Portfolio '{portfolio_name}' does not exist.")
+    db.add_to_group(group_name, portfolio_name)
+    click.echo(f"Added '{portfolio_name}' to '{group_name}'.")
+
+
+@group.command("remove")
+@click.argument("group_name")
+@click.argument("portfolio_name")
+def group_remove(group_name, portfolio_name):
+    """Remove a portfolio from a group."""
+    db = Database()
+    db.remove_from_group(group_name, portfolio_name)
+    click.echo(f"Removed '{portfolio_name}' from '{group_name}'.")
+
+
+@group.command("delete")
+@click.argument("name")
+def group_delete(name):
+    """Delete a group and clear all its memberships (portfolios are untouched)."""
+    db = Database()
+    db.delete_group(name)
+    click.echo(f"Deleted group '{name}'.")
+
+
+@group.command("show")
+@click.argument("portfolio_name")
+def group_show(portfolio_name):
+    """Show which groups a portfolio belongs to."""
+    db = Database()
+    groups = db.get_groups_for_portfolio(portfolio_name)
+    if not groups:
+        click.echo(f"'{portfolio_name}' is not in any group.")
+    else:
+        click.echo(f"'{portfolio_name}' is in: {', '.join(groups)}")
+
+
+@cli.group()
+def benchmarks():
+    """Named benchmark portfolios (60/40, All Seasons, Golden Butterfly, …)."""
+    pass
+
+
+@benchmarks.command("list")
+def benchmarks_list():
+    """Print every benchmark + its proxy weights."""
+    from src.benchmarks import BENCHMARKS
+    for name, b in BENCHMARKS.items():
+        click.echo(f"\n{name}")
+        click.echo("  " + b.description)
+        rows = [{"ticker": t, "weight": f"{w:.2%}"} for t, w in b.weights.items()]
+        click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@benchmarks.command("fetch")
+@click.option("--period", default="10y",
+              help="yfinance period to pull for each proxy (default 10y).")
+def benchmarks_fetch(period):
+    """Pull price history for every benchmark proxy via yfinance."""
+    from src.benchmarks import all_proxy_tickers
+    from src.collector import Collector
+    db = Database()
+    tickers = all_proxy_tickers()
+    click.echo(f"Fetching prices for {len(tickers)} proxy tickers: {', '.join(tickers)}")
+    Collector(db).collect_prices(tickers, period=period)
+    click.echo("Done.")
+
+
+@cli.group()
+def metrics():
+    """Compute & persist daily returns / risk / attribution time series."""
+    pass
+
+
+@cli.group()
+def production():
+    """Run / monitor the scheduled analytics-production jobs."""
+    pass
+
+
+@production.command("status")
+def production_status():
+    """Show each job's last run, status, and whether it's due."""
+    import pandas as pd
+    from src.production import JobRunner
+    runner = JobRunner(Database())
+    jobs = runner.db.get_production_jobs().sort_values("job_name")
+    now = pd.Timestamp.now()
+    rows = []
+    for _, r in jobs.iterrows():
+        last_run = r["last_run_at"]
+        rows.append({
+            "job":         r["job_name"],
+            "enabled":     "yes" if bool(r["enabled"]) else "no",
+            "interval_h":  round(int(r["interval_minutes"]) / 60, 1),
+            "last_run":    last_run.strftime("%Y-%m-%d %H:%M") if pd.notna(last_run) else "—",
+            "last_status": r["last_status"] or "—",
+            "due":         "yes" if runner.is_due(r, now=now) else "no",
+        })
+    click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@production.command("run")
+def production_run():
+    """Run every job that's currently due. Cron-friendly one-shot."""
+    from src.production import JobRunner
+    runner = JobRunner(Database())
+    results = runner.run_due_jobs()
+    if not results:
+        click.echo("No jobs were due.")
+        return
+    for r in results:
+        click.echo(f"[{r['status']:7}] {r['job_name']:24}  {r.get('duration_seconds', 0):.2f}s"
+                   + (f"  — {r.get('error')}" if r['status'] == 'error' else ""))
+
+
+@production.command("run-now")
+@click.argument("job_name")
+def production_run_now(job_name):
+    """Force-run one job ignoring schedule + enabled flag."""
+    from src.production import JobRunner, JOB_REGISTRY
+    if job_name not in JOB_REGISTRY:
+        raise click.ClickException(
+            f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
+        )
+    runner = JobRunner(Database())
+    r = runner.run_job(job_name, force=True)
+    click.echo(
+        f"[{r['status']}] {job_name}  {r.get('duration_seconds', 0):.2f}s"
+        + (f"\n{r.get('error')}" if r['status'] == 'error' else "")
+    )
+
+
+@production.command("daemon")
+@click.option("--check-every", default=60, type=int,
+              help="Seconds between schedule checks (default 60).")
+def production_daemon(check_every):
+    """Long-running loop: check the schedule every N seconds and run due jobs."""
+    from src.production import JobRunner
+    click.echo(f"Production daemon started; checking every {check_every}s. Ctrl-C to stop.")
+    JobRunner(Database()).daemon(check_every_seconds=check_every)
+
+
+@production.group()
+def schedule():
+    """Manage systemd user timers for production jobs."""
+    pass
+
+
+@schedule.command("list")
+def schedule_list():
+    """Show systemd-timer status for every registered job."""
+    from src import scheduler as _sched
+    if not _sched.is_systemd_available():
+        raise click.ClickException(
+            "systemd --user is not available on this system."
+        )
+    rows = []
+    for name, st_ in _sched.list_scheduled().items():
+        rows.append({
+            "job":       name,
+            "installed": "yes" if st_.get("installed") else "no",
+            "active":    st_.get("active_raw", "—"),
+            "enabled":   st_.get("enabled_raw", "—"),
+            "next_run":  st_.get("next_run") or "—",
+        })
+    click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@schedule.command("install")
+@click.argument("job_name")
+@click.option("--interval", default=None, type=int,
+              help="Override the job's configured interval (minutes).")
+def schedule_install(job_name, interval):
+    """Install + enable a user systemd timer for one job."""
+    from src import scheduler as _sched
+    from src.production import JOB_REGISTRY
+    if job_name not in JOB_REGISTRY:
+        raise click.ClickException(
+            f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
+        )
+    if interval is None:
+        db = Database()
+        jobs = db.get_production_jobs()
+        match = jobs[jobs["job_name"] == job_name] if not jobs.empty else None
+        interval = int(match["interval_minutes"].iloc[0]) if match is not None and not match.empty \
+                   else int(JOB_REGISTRY[job_name]["interval_minutes"])
+    res = _sched.install(job_name, interval)
+    if not res["ok"]:
+        raise click.ClickException(res["detail"])
+    click.echo(res["detail"])
+
+
+@schedule.command("uninstall")
+@click.argument("job_name")
+def schedule_uninstall(job_name):
+    """Disable + remove the user systemd timer for one job."""
+    from src import scheduler as _sched
+    res = _sched.uninstall(job_name)
+    if not res["ok"]:
+        raise click.ClickException(res["detail"])
+    click.echo(res["detail"])
+
+
+@metrics.command("refresh")
+@click.option("--portfolio", "portfolio_name", default=None,
+              help="Refresh only this portfolio (default: all).")
+@click.option("--from", "start_date", default=None,
+              help="Recompute from this date onward (YYYY-MM-DD).")
+@click.option("--full", is_flag=True, help="Recompute the full history (ignore incremental).")
+def metrics_refresh(portfolio_name, start_date, full):
+    """Compute daily security / portfolio / attribution metrics and save to parquet."""
+    from src.attribution import AttributionEngine
+    db = Database()
+    summary = AttributionEngine(db).refresh_all(
+        start_date=start_date, portfolio_name=portfolio_name, full=full,
+    )
+    click.echo(
+        f"Refreshed metrics — security: {summary['security_rows']} rows, "
+        f"portfolio: {summary['portfolio_rows']} rows, "
+        f"attribution: {summary['attribution_rows']} rows "
+        f"(portfolios: {', '.join(summary['portfolios'])})"
+    )
 
 
 @cli.command()

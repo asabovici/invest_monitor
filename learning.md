@@ -174,10 +174,45 @@ Two views toggled from sidebar radio:
 | Agent | CLI | Purpose |
 |-------|-----|---------|
 | `RiskAgent` | `invest-monitor agent` | Risk measurement, stress testing, scenario analysis (13 skills) |
-| `WealthAgent` | `invest-monitor wealth` | P&L, Sharpe/Sortino, rebalancing, goal projection, tax-loss harvesting (9 skills) |
+| `WealthAgent` | `invest-monitor wealth` | P&L, Sharpe/Sortino, rebalancing, goal projection, scenario analysis, tax-loss harvesting (11 skills) |
 | `ResearchAgent` | `invest-monitor research` | Capital deployment within constraints; uses live web search + portfolio simulation (5 skills + server-side web_search) |
 
 All agents: multi-turn conversation, `client.beta.messages.tool_runner`, thinking blocks stored separately from history to avoid issues on subsequent turns.
+
+### `src/scenarios.py`
+
+Defines `ScenarioPhase`, `Scenario`, and two module-level constants:
+
+**`SCENARIOS`** — 9 named scenarios, each composed of sequential `ScenarioPhase` objects:
+
+| Scenario | Description |
+|---|---|
+| `base` | No adjustment — identical to plain Monte Carlo |
+| `market_crash` | 2008-style: -15% instant drop → 3mo selling → 12mo bear → recovery |
+| `mild_correction` | 10–15% correction over 3mo, then rebound |
+| `prolonged_low_growth` | Lost decade: returns at 20% of historical average for entire horizon |
+| `stagflation` | 1970s-style: flat-to-negative real returns, elevated vol |
+| `bull_run` | 2× historical returns, compressed vol |
+| `flash_crash_recovery` | -12% flash crash in 1mo, then V-shaped recovery |
+| `double_dip` | Bear → false rally → second bear → genuine recovery |
+| `rate_shock` | 2022-style rate spike: -10% shock, 12mo adjustment, then lower-growth new normal |
+
+Each `ScenarioPhase` carries:
+- `duration_days` — trading days (use `10_000_000` sentinel for "rest of horizon")
+- `return_multiplier` — multiplies historical daily mu (negative flips direction)
+- `vol_multiplier` — multiplies historical daily sigma
+- `one_time_shock` — fractional hit to portfolio value on the first day of the phase
+
+**`CROSS_ASSET_BETAS`** — empirical sensitivity of each asset class to a 1-unit equity move:
+
+| Asset class | Beta vs Stock |
+|---|---|
+| Stock | 1.00 (reference) |
+| ETF | 0.85 |
+| Fund | 0.70 |
+| Bond | -0.15 (flight to quality) |
+| Crypto | 0.75 |
+| Cash | 0.00 |
 
 ---
 
@@ -209,6 +244,42 @@ When computing exposure with current prices:
 - **Cumulative return** — `prices / prices.iloc[0] - 1`, rebased to 0 at first available date
 - **Max drawdown** — `(price - cummax) / cummax`, minimum over full history
 - **Portfolio weighting** — dollar-weighted by `quantity × cost_basis`
+
+---
+
+## Scenario-Based Projection: How the MC Simulation Works
+
+`run_scenario_analysis` (WealthAgent skill) extends the existing Monte Carlo with two orthogonal features:
+
+### Phase-aware return generation
+
+For each trading day the simulation determines the active scenario phase (phases are applied in order, each consuming `duration_days`). The effective parameters for that day are:
+
+```
+mu    = (base_daily_mu + beta_shock_daily) * phase.return_multiplier
+sigma = base_daily_sigma * phase.vol_multiplier
+```
+
+A `one_time_shock` (if non-zero) is applied **once** on the first day of each phase as a multiplicative factor:
+
+```
+paths[:, day] *= (1 + phase.one_time_shock)
+```
+
+### Beta-implied cross-asset shocks
+
+When `shocked_asset_class` + `shock_return_pct` are provided:
+
+1. Look up the reference beta for the shocked class from `CROSS_ASSET_BETAS`
+2. For every other class: `implied_annual_shock = shock_return_pct% × (beta[class] / beta[shocked_class])`
+3. For every position, map it to an asset class → get its implied shock
+4. Value-weight all per-position implied shocks into a single `portfolio_weighted_annual_shock`
+5. Convert to daily drift: `beta_shock_daily = portfolio_weighted_annual_shock / 252`
+6. Add to `base_daily_mu` before applying the scenario phase multiplier
+
+**Example:** shock Stock by -40%. Bond (beta -0.15) gets +6% implied (rally), Crypto (beta 0.75) gets -30% implied. The portfolio-level adjustment is the value-weighted blend of all positions' implied shocks.
+
+Both features can be combined: e.g. `scenario_name="market_crash"` with `shocked_asset_class="Stock"` and `shock_return_pct=-40`.
 
 ---
 

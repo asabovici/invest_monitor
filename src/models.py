@@ -8,6 +8,7 @@ class AssetType(Enum):
     ETF = "ETF"
     FUND = "Fund"
     CASH = "Cash"
+    CD = "CD"
     CRYPTO = "Crypto"
 
 @dataclass
@@ -23,6 +24,18 @@ class Asset:
     name: str
     currency: str = "USD"
     sector: Optional[str] = None
+    # Income — units depend on asset_type:
+    #   • Stock / ETF / Fund : dollars per share PER PAYMENT
+    #                          (annual = quantity × income_rate × payment_frequency)
+    #                          e.g. BLK pays $5.72 quarterly → income_rate=5.72, payment_frequency=4
+    #   • Bond / CD / Cash   : annual rate as a percent
+    #                          (annual = base_value × income_rate / 100)
+    #                          e.g. 4.5 for a 4.5% coupon / yield
+    #   • Crypto / unknown   : annual rate as a percent (default 0)
+    income_rate: float = 0.0
+    # Payments per year (1 annual, 2 semi-annual, 4 quarterly, 12 monthly).
+    # Only meaningful for Bond and CD; defaults to 1 elsewhere.
+    payment_frequency: int = 1
     constituents: List[Constituent] = field(default_factory=list)
 
     def is_composite(self) -> bool:
