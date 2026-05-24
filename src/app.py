@@ -14,7 +14,13 @@ from src.data.ingestion import Ingester
 from src.database.database import Database
 from src.models import Asset, AssetType, Portfolio, Position
 from src.reporting import ReportingEngine
-from src.agent import RiskAgent, WealthAgent, ResearchAgent
+from src.agent import (
+    CIOAgent,
+    PortfolioManagerAgent,
+    ResearchAgent,
+    RiskAgent,
+    WealthAgent,
+)
 from src import demo as demo_data
 
 st.set_page_config(
@@ -2015,8 +2021,14 @@ if view == "Multi-Portfolio Dashboard":
 
             st.session_state[msgs_key].append({"role": "assistant", "content": reply})
 
-    tab_risk_chat, tab_wealth_chat, tab_research_chat = st.tabs([
-        "⚠️ Risk", "💰 Wealth", "🔬 Research",
+    (
+        tab_risk_chat,
+        tab_wealth_chat,
+        tab_research_chat,
+        tab_pm_chat,
+        tab_cio_chat,
+    ) = st.tabs([
+        "⚠️ Risk", "💰 Wealth", "🔬 Research", "💼 PM", "🎩 CIO",
     ])
     with tab_risk_chat:
         _render_agent_chat("risk", RiskAgent, "Risk")
@@ -2024,6 +2036,10 @@ if view == "Multi-Portfolio Dashboard":
         _render_agent_chat("wealth", WealthAgent, "Wealth")
     with tab_research_chat:
         _render_agent_chat("research", ResearchAgent, "Research")
+    with tab_pm_chat:
+        _render_agent_chat("pm", PortfolioManagerAgent, "PM")
+    with tab_cio_chat:
+        _render_agent_chat("cio", CIOAgent, "CIO")
 
     st.stop()
 

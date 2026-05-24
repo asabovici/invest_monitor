@@ -12,6 +12,7 @@ import numpy as np
 from anthropic import beta_tool
 from scipy.optimize import minimize
 
+from src.agent.report_export import make_export_report_skill
 from src.database import Database
 from src.reporting import ReportingEngine
 from src.scenarios import SCENARIOS, CROSS_ASSET_BETAS
@@ -867,4 +868,5 @@ def create_wealth_skills(db: Database, engine: ReportingEngine) -> List:
         find_tax_loss_opportunities,
         list_scenarios,
         run_scenario_analysis,
+        make_export_report_skill(db, agent_kind="wealth"),
     ]
