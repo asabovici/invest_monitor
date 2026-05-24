@@ -21,6 +21,7 @@ All state is stored as Parquet files under `data/` (gitignored). Demo mode uses 
 | `production_runs.parquet` | `run_id, job_name, started_at, ended_at, status, error_message, details, duration_seconds` |
 | `groups.parquet` | Portfolio group registry: `name, description, created_at` |
 | `portfolio_groups.parquet` | Many-to-many group ↔ portfolio: `group_name, portfolio_name` |
+| `agent_summaries.json` | Saved agent-conversation summaries (not parquet — small text-heavy JSON). Keyed `"{agent}__{iso_datetime}"`. See [Conversation Summaries](conversation-summaries.md). |
 | `prices/<TICKER>.parquet` | `date` (index), `price` |
 
 ## Key concepts

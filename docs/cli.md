@@ -47,6 +47,17 @@ invest-monitor metrics refresh --full                     # recompute everything
 
 v2 trade-replay is auto-selected per portfolio when `trades.parquet` has rows for it. See [Performance Attribution](performance-attribution.md).
 
+## Conversation summaries
+
+```bash
+invest-monitor summaries list                              # newest first
+invest-monitor summaries list --agent risk                 # filter
+invest-monitor summaries show "risk__2026-05-17T14:30:00"  # full text
+invest-monitor summaries delete "risk__2026-05-17T14:30:00"
+```
+
+See [Conversation Summaries](conversation-summaries.md).
+
 ## Portfolio groups
 
 ```bash

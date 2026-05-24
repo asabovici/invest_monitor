@@ -93,6 +93,7 @@ nav:
     - Risk: risk.md
   - CLI Reference: cli.md
   - AI Agents: ai-agents.md
+  - Conversation Summaries: conversation-summaries.md
   - Data Model: data-model.md
   - Production: production.md
   - Developer Guide: developer.md

@@ -119,6 +119,7 @@ src/
 ├── production.py    — Scheduled-job runner: JobRunner + JOB_REGISTRY
 ├── scheduler.py     — systemd --user timer install / uninstall / status
 ├── benchmarks.py    — Named benchmark portfolios (60/40, All Seasons, …)
+├── agent_summaries.py — JSON store + Haiku summariser for past agent chats
 ├── scenarios.py     — MC scenarios, cross-asset betas, sector stress presets,
 │                      sector-ETF map, asset-class correlations, regime presets
 ├── demo.py          — Seed/reset the data_demo/ dataset
@@ -323,6 +324,8 @@ data/
 │                                          name, description, created_at
 ├── portfolio_groups.parquet            — many-to-many group ↔ portfolio:
 │                                          group_name, portfolio_name
+├── agent_summaries.json                — saved summaries of past agent chats
+│                                          (JSON, not parquet — text-heavy)
 └── prices/
     └── {TICKER}.parquet                — date-indexed daily close prices
 ```

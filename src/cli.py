@@ -104,6 +104,59 @@ def demo_reset():
 
 
 @cli.group()
+def summaries():
+    """Manage stored summaries of past agent conversations."""
+    pass
+
+
+@summaries.command("list")
+@click.option("--agent", default=None,
+              help="Filter to one agent (risk / wealth / research).")
+def summaries_list(agent):
+    """Show all saved agent-conversation summaries, newest first."""
+    from src import agent_summaries
+    items = agent_summaries.list_summaries(agent=agent)
+    if not items:
+        click.echo("No summaries stored." + (f" (filter: agent={agent})" if agent else ""))
+        return
+    rows = [{
+        "key":       s["key"],
+        "agent":     s["agent"],
+        "started":   s["started_at"],
+        "msgs":      s["message_count"],
+        "preview":   (s.get("summary") or "")[:60].replace("\n", " ") + "…",
+    } for s in items]
+    click.echo(tabulate(rows, headers="keys", tablefmt="github"))
+
+
+@summaries.command("show")
+@click.argument("key")
+def summaries_show(key):
+    """Print one summary in full."""
+    from src import agent_summaries
+    s = agent_summaries.get_summary(key)
+    if s is None:
+        raise click.ClickException(f"No summary with key '{key}'.")
+    click.echo(f"agent      : {s['agent']}")
+    click.echo(f"started_at : {s['started_at']}")
+    click.echo(f"messages   : {s['message_count']}")
+    click.echo()
+    click.echo("=== SUMMARY ===")
+    click.echo(s.get("summary") or "(empty)")
+
+
+@summaries.command("delete")
+@click.argument("key")
+def summaries_delete(key):
+    """Delete a stored summary."""
+    from src import agent_summaries
+    if agent_summaries.delete_summary(key):
+        click.echo(f"Deleted '{key}'.")
+    else:
+        raise click.ClickException(f"No summary with key '{key}'.")
+
+
+@cli.group()
 def group():
     """Manage portfolio groups (e.g. Taxable, Tax-Free, Retirement)."""
     pass

@@ -20,6 +20,8 @@ Three conversational agents powered by **Claude Opus 4.6 with adaptive thinking*
 
     Multi-Portfolio Dashboard → **🤖 Ask the Agents** section. Three tabs (Risk / Wealth / Research). Each tab keeps its own history and is scoped to the active data dir (live vs demo). Lazy instantiation: the `Anthropic()` client is only built when you send the first message in a tab, so a missing `ANTHROPIC_API_KEY` shows a clear inline error instead of crashing the dashboard.
 
+    Each tab also has a **💾 Save summary** button (compress + persist the chat) and a **📂 Load past conversation context** expander (re-prime the agent with any past summary, even from a different agent). See [Conversation Summaries](conversation-summaries.md).
+
 === "Programmatic"
 
     ```python

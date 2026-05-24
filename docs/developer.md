@@ -13,6 +13,7 @@ src/
 ├── attribution.py   — Daily metrics + v1/v2 attribution reconstruction
 ├── scenarios.py     — MC scenarios, betas, sector stress presets, regime presets
 ├── benchmarks.py    — Named benchmark portfolios (60/40, All Seasons, …)
+├── agent_summaries.py — JSON store + Haiku summariser for past agent chats
 ├── production.py    — Scheduled-job runner (JobRunner + JOB_REGISTRY)
 ├── scheduler.py     — systemd --user timer install / uninstall / status
 ├── demo.py          — Seed/reset the data_demo/ dataset
@@ -98,6 +99,12 @@ expand_lookthrough_rows(portfolio, db, prices, enabled=True, yfinance_fallback=T
 
 !!! info "String columns with all-NaN values"
     pandas infers dtype as `float64`, breaking Streamlit's `TextColumn`. `Database.get_all_assets()` and `get_portfolio()` cast `name`, `sector`, `currency` to `str`/`None` on read. Do the same for any new string columns added to parquet files.
+
+!!! info "Conversation summaries use Haiku, not Opus"
+    `agent_summaries.summarize_conversation()` calls `claude-haiku-4-5-20251001` rather than the main agent's Opus model. Summarisation is a fixed-form compression task — Haiku does it cheaply and quickly. The main agent stays on Opus for actual reasoning. The summary JSON lives at `data/agent_summaries.json` (per-data-dir, so demo and live are separate) and stores the **full transcript** alongside the summary, so you can re-summarise with a different model later if you want.
+
+!!! info "Loaded context primes the agent — it doesn't replay the transcript"
+    `build_context_prompt()` formats selected summaries as a single user message that explicitly asks the agent to *acknowledge briefly and wait* for the next question. The transcript itself isn't replayed turn-by-turn (that would inflate token use), only the compressed summary text. Treat saved summaries as memory aids, not lossless logs.
 
 !!! info "Portfolio groups are many-to-many, not partitions"
     A single portfolio can belong to *N* groups (e.g. SCHAB ∈ {Taxable, Brokerage}). The dashboard filter scopes to one group at a time; **"View as combined portfolio"** merges *that group's* member portfolios into a synthetic entity (quantity-summed positions, weighted-average cost basis) but doesn't double-count anything. `db.add_to_group` is idempotent. Deleting a group removes its memberships; member portfolios themselves are untouched.

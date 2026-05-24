@@ -18,7 +18,7 @@ A personal investment portfolio monitoring tool with risk analytics, ETF lookthr
 - **Demo mode** — sidebar toggle (or CLI) that switches to a separate `data_demo/` dataset with sample portfolios, so you can screenshot/share without exposing live accounts
 - **Analytics & return production** — scheduled jobs that keep prices, attribution metrics, sector betas, and fund profiles fresh. Run on demand from the dashboard's **⚙️ Production** view, or wire `invest-monitor production run` into cron / systemd for true automation. Run log + an **Issues** tab surfaces any failures.
 - **Streamlit dashboard** — interactive UI across nine tabs per portfolio plus a multi-portfolio dashboard with embedded **agent chat**
-- **AI agents** — three conversational agents powered by Claude (Risk Analyst, Wealth Planner, Research / Capital Deployment), reachable from the CLI **or directly from the dashboard sidebar tabs**
+- **AI agents** — three conversational agents powered by Claude (Risk Analyst, Wealth Planner, Research / Capital Deployment), reachable from the CLI **or directly from the dashboard sidebar tabs**. Conversations can be summarised (via Haiku) and stored in `agent_summaries.json`, then loaded as priming context into future chats — even across different agents
 
 ## Project Structure
 
@@ -40,6 +40,7 @@ invest_monitor/
 │   ├── production.py      # Scheduled-job runner (JobRunner + JOB_REGISTRY)
 │   ├── scheduler.py       # systemd --user timer install / uninstall / status
 │   ├── benchmarks.py      # Named benchmark portfolios (60/40, All Seasons, ...)
+│   ├── agent_summaries.py # Save + load summaries of past agent conversations
 │   ├── demo.py            # Seed/reset demo dataset (data_demo/)
 │   ├── agent/
 │   │   ├── agent.py           # RiskAgent
@@ -68,6 +69,7 @@ invest_monitor/
     ├── production_runs.parquet         # append-only production run log
     ├── groups.parquet                  # portfolio group registry
     ├── portfolio_groups.parquet        # many-to-many group ↔ portfolio
+    ├── agent_summaries.json            # saved summaries of past agent chats
     └── prices/{TICKER}.parquet         # daily close prices
 ```
 
@@ -129,6 +131,12 @@ invest-monitor production schedule list                # timer status per job
 invest-monitor production schedule install refresh_attribution
 invest-monitor production schedule install collect_prices --interval 720  # override (min)
 invest-monitor production schedule uninstall refresh_attribution
+
+# ── Agent conversation summaries ───────────────────────────────────────────
+invest-monitor summaries list                              # newest first
+invest-monitor summaries list --agent risk
+invest-monitor summaries show "risk__2026-05-17T14:30:00"
+invest-monitor summaries delete "risk__2026-05-17T14:30:00"
 
 # ── Portfolio groups (Taxable, Tax-Free, Retirement, ...) ─────────────────
 invest-monitor group list                              # all groups + members
