@@ -17,6 +17,8 @@ dependencies = [
     "duckdb",
     "anthropic",
     "python-dotenv",
+    "langgraph",
+    "langchain-core",
 ]
 
 [project.optional-dependencies]
