@@ -3,3 +3,7 @@
 *.parquet
 .env
 site/
+__pycache__/
+*.pyc
+.pytest_cache/
+data*/reports/

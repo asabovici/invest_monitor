@@ -1,11 +1,24 @@
 # Agents
 
-invest-monitor ships three conversational agents — **Risk**, **Wealth**, and **Research** — all powered by **Claude Opus 4.6 with adaptive thinking** and the Anthropic beta tool runner. Each agent maintains multi-turn conversation history so follow-up questions work without repeating context.
+invest-monitor has **two distinct agent systems**:
+
+1. **Conversational agents** (this document) — five single-actor tool-runners powered by Claude Opus 4.6, each maintaining its own chat history:
+   - Analytics agents: **Risk**, **Wealth**, **Research**
+   - Decision agents: **Portfolio Manager**, **CIO** — conversational counterparts to nodes in the LangGraph coordination system
+2. **Multi-agent coordination graph** (`src/trading_graph/`) — a LangGraph pipeline with four nodes (Researcher → Portfolio Manager → Risk Manager → CIO) sharing a single `TradingState`, with a bounded PM ↔ Risk revision loop and an optional human-in-the-loop pause before the CIO signs off. Use this to produce a vetted trade proposal end-to-end. See [`docs/multi-agent-graph.md`](docs/multi-agent-graph.md).
+
+The rest of this document covers the conversational agents.
+
+---
+
+## Conversational agents
+
+The five conversational agents are all powered by **Claude Opus 4.6 with adaptive thinking** and the Anthropic beta tool runner. Each agent maintains multi-turn conversation history so follow-up questions work without repeating context.
 
 You can talk to them three ways:
-1. **CLI** — `invest-monitor agent`, `invest-monitor wealth`, `invest-monitor research`.
-2. **Streamlit dashboard** — embedded chat panel at the bottom of the Multi-Portfolio Dashboard under **🤖 Ask the Agents**, with a tab per agent. Each tab keeps its own history and is scoped to the active data dir (live vs demo).
-3. **Programmatic** — `from src.agent import RiskAgent, WealthAgent, ResearchAgent` (see end of file).
+1. **CLI** — `invest-monitor agent`, `invest-monitor wealth`, `invest-monitor research`, `invest-monitor pm`, `invest-monitor cio`.
+2. **Streamlit dashboard** — embedded chat panel at the bottom of the Multi-Portfolio Dashboard under **🤖 Ask the Agents**, with a tab per agent (Risk / Wealth / Research / PM / CIO). Each tab keeps its own history and is scoped to the active data dir (live vs demo).
+3. **Programmatic** — `from src.agent import RiskAgent, WealthAgent, ResearchAgent, PortfolioManagerAgent, CIOAgent` (see end of file).
 
 All three read `ANTHROPIC_API_KEY` from the environment. The simplest way is a project-local `.env` file (auto-loaded via `src/env.py`):
 
@@ -179,6 +192,12 @@ uv run invest-monitor wealth --portfolio "My Portfolio" --query "Should I rebala
 |---|---|
 | `find_tax_loss_opportunities(min_loss_pct=5)` | Identifies positions with unrealised losses exceeding the threshold — candidates for tax-loss harvesting. Also flags positions with large unrealised gains (>20%) for tax-planning awareness. Always returns a disclaimer that this is not tax advice. |
 
+#### Reports
+
+| Skill | Description |
+|---|---|
+| `export_report(filename, markdown_content, overwrite=False)` | Persist a wealth-review report as markdown under `<data_dir>/reports/`. The agent composes the content; the skill only handles I/O. |
+
 ---
 
 ## Research Agent
@@ -238,12 +257,100 @@ uv run invest-monitor research --portfolio "My Portfolio" --query "I want to add
 
 ---
 
+## Portfolio Manager Agent
+
+**Class:** `src/agent/portfolio_manager_agent.py:PortfolioManagerAgent`
+**CLI:** `invest-monitor pm`
+**Skills file:** `src/agent/pm_skills.py`
+
+Conversational counterpart to the `portfolio_manager` node in `src/trading_graph/`. Translates a market view (or a CIO follow-up) into a concrete, defensible trade proposal that the Risk Manager and CIO can review. The agent builds proposals; it does not sign off.
+
+### CLI usage
+
+```bash
+# Interactive session — opens with a portfolio snapshot prompt
+uv run invest-monitor pm --portfolio "My Portfolio"
+
+# One-shot queries
+uv run invest-monitor pm --query "Propose a 60/40 deployment of \$50k into VTI and BND"
+uv run invest-monitor pm --portfolio "My Portfolio" --query "Rebalance to equal-weight across all current holdings"
+```
+
+### Skills (6 total)
+
+| Skill | Description |
+|---|---|
+| `list_portfolios` | List all portfolios available. |
+| `get_portfolio_snapshot(portfolio_name)` | Current positions with quantity, cost basis per share, latest price, market value, and weight %. PM-focused — no risk metrics. |
+| `propose_trades(portfolio_name, target_allocation_json, total_amount, rebalance_mode="deploy")` | Convert a target allocation into concrete BUY/SELL orders. `rebalance_mode="deploy"` adds new capital on top of existing holdings; `"rebalance"` treats `total_amount` as the desired total portfolio value. Allocation weights can be fractions or percents — they're normalised. |
+| `compare_to_target(portfolio_name, target_allocation_json)` | Current vs target weight per ticker, with delta and a verdict (increase / decrease / hold). |
+| `estimate_sector_tilt(portfolio_name, target_allocation_json, total_amount)` | Sector exposure before and after applying the proposed allocation. |
+| `summarise_proposal(portfolio_name, target_allocation_json, total_amount, rationale)` | Emit a clean structured proposal record (text + JSON) for hand-off to the CIO. |
+| `export_report(filename, markdown_content, overwrite=False)` | Persist a proposal brief as markdown under `<data_dir>/reports/`. |
+
+---
+
+## CIO Agent
+
+**Class:** `src/agent/cio_agent.py:CIOAgent`
+**CLI:** `invest-monitor cio`
+**Skills file:** `src/agent/cio_skills.py`
+
+Conversational counterpart to the `cio` node in `src/trading_graph/`. Holistic oversight: reviews proposals against firm-level concentration and sector caps and produces one of three structured decisions — approve, override, or request more research. Does not execute trades; `approve_proposal` emits a sign-off record only.
+
+### CLI usage
+
+```bash
+# Interactive session — opens with a holistic CIO view
+uv run invest-monitor cio --portfolio "My Portfolio"
+
+# One-shot queries
+uv run invest-monitor cio --query "Review this proposal: deploy \$25k as {AAPL: 0.5, MSFT: 0.5} into My Portfolio"
+uv run invest-monitor cio --portfolio "My Portfolio" --query "What's our biggest concentration risk right now?"
+```
+
+### Skills (6 total)
+
+| Skill | Description |
+|---|---|
+| `list_portfolios` | List all portfolios available. |
+| `get_holistic_view(portfolio_name, top_n=5)` | CIO single-screen: total value, top N positions, sector concentration, one-line risk headline. |
+| `review_proposal(portfolio_name, target_allocation_json, total_amount, max_position_pct=30, max_sector_pct=40)` | Score the proposal against high-level CIO thresholds. Flags any per-position weight above `max_position_pct` (post-deploy) and any sector exposure above `max_sector_pct`. Returns a `PASSES CIO CHECKS` or `REQUEST CHANGES` verdict. |
+| `approve_proposal(portfolio_name, target_allocation_json, total_amount, signoff_note)` | Formal sign-off record (text + JSON). |
+| `override_proposal(portfolio_name, original_allocation_json, override_allocation_json, total_amount, reason)` | Replace the PM's proposal with the CIO's version + concrete reason. |
+| `request_more_research(question, scope="general")` | Brief the Researcher with a specific question rather than a blanket rejection. |
+| `export_report(filename, markdown_content, overwrite=False)` | Persist a CIO decision memo as markdown under `<data_dir>/reports/`. |
+
+---
+
+## Exporting reports
+
+The Wealth, PM, and CIO agents share an `export_report(filename, markdown_content, overwrite=False)` skill. The agent composes the full markdown body in conversation (so the report inherits whatever context you've built up with it) and hands it to the skill for persistence. The skill:
+
+- Writes to `<data_dir>/reports/<filename>` (auto-created), scoped to the active dataset (live vs demo).
+- Sanitises the filename — path components are stripped, non-`[A-Za-z0-9._-]` characters are replaced with `_`, and a `.md` extension is appended if missing.
+- Refuses to overwrite an existing file unless the agent passes `overwrite=True`.
+- Prepends a `<!-- generated by <agent> at <iso8601> -->` comment for traceability (invisible in rendered markdown).
+
+The `reports/` directory is gitignored via `data*/reports/`.
+
+Trigger any of them with prompts like:
+
+- *"Write up a wealth review for 'My Portfolio' and save it as `wealth_review_2026q2.md`."*
+- *"Persist this proposal as `tech_rotation_proposal.md`."*
+- *"Save the CIO memo for that decision as `cio_memo_my_portfolio_2026q2.md`."*
+
+---
+
 ## Programmatic usage
 
-Both agents can be used directly in Python, not just from the CLI.
+All five agents can be used directly in Python, not just from the CLI.
 
 ```python
-from src.agent import RiskAgent, WealthAgent, ResearchAgent
+from src.agent import (
+    RiskAgent, WealthAgent, ResearchAgent,
+    PortfolioManagerAgent, CIOAgent,
+)
 
 # Risk agent — interactive
 agent = RiskAgent()
@@ -267,6 +374,20 @@ agent = ResearchAgent()
 print(agent.run_query(
     "How can I deploy $100k into my 'My Portfolio' without increasing "
     "software sector exposure or my overall VaR?"
+))
+
+# Portfolio Manager — build a proposal
+pm = PortfolioManagerAgent()
+print(pm.chat(
+    "Snapshot 'My Portfolio' and propose how to deploy $25k across "
+    "BND and VTI 50/50. Summarise the final proposal."
+))
+
+# CIO — review and decide
+cio = CIOAgent()
+print(cio.chat(
+    'Review this proposal for "My Portfolio": deploy $25k as '
+    '{"BND": 0.5, "VTI": 0.5}. Approve, override, or kick back?'
 ))
 ```
 

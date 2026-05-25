@@ -21,14 +21,27 @@ src/
 │   └── database.py  — Parquet-backed data store with schema auto-migration
 ├── data/
 │   └── ingestion.py — Portfolio CSV + ETF holdings CSV parsers
-└── agent/
-    ├── agent.py          — RiskAgent
-    ├── skills.py         — Risk agent tools
-    ├── wealth_agent.py   — WealthAgent
-    ├── wealth_skills.py  — Wealth agent tools (includes scenario analysis)
-    ├── research_agent.py — ResearchAgent
-    └── research_skills.py
+├── agent/
+│   ├── agent.py                  — RiskAgent
+│   ├── skills.py                 — Risk agent tools
+│   ├── wealth_agent.py           — WealthAgent
+│   ├── wealth_skills.py          — Wealth agent tools (includes scenario analysis)
+│   ├── research_agent.py         — ResearchAgent
+│   ├── research_skills.py        — Research tools + server-side web search
+│   ├── portfolio_manager_agent.py — PortfolioManagerAgent (conversational PM)
+│   ├── pm_skills.py              — PM tools: snapshot, propose_trades, sector tilt, summarise
+│   ├── cio_agent.py              — CIOAgent (holistic oversight, approve / override / kick back)
+│   └── cio_skills.py             — CIO tools: holistic_view, review_proposal, approve, override
+└── trading_graph/        — LangGraph multi-agent coordination (Researcher / PM / Risk / CIO)
+    ├── state.py          — TradingState TypedDict + reducers
+    ├── config.py         — Settings (model, HITL, max_revisions, risk thresholds)
+    ├── routing.py        — Conditional-edge functions, loop-bounded
+    ├── graph.py          — build_graph(): StateGraph + MemorySaver + HITL interrupt
+    ├── run.py            — CLI smoke entrypoint
+    └── nodes/            — researcher, portfolio_manager, risk_manager, cio (stubs)
 ```
+
+See [Multi-Agent Graph](multi-agent-graph.md) for the architecture, state contract, and build status.
 
 ## How key pieces connect
 

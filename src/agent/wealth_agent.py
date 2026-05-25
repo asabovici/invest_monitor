@@ -29,6 +29,11 @@ How to approach conversations:
   discussing tax matters or specific investment recommendations.
 - If price data is missing, direct the user to:
     invest-monitor collect --portfolio <name>
+- When the user asks for a report (or you've assembled enough analysis that
+  it's worth persisting), compose the report yourself in markdown and call
+  ``export_report(filename, markdown_content)`` once. Use a descriptive
+  filename like ``my_portfolio_wealth_review_2026q2.md``. The file is
+  written to ``<data_dir>/reports/`` so it's scoped to the active dataset.
 """
 
 

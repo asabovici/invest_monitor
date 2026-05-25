@@ -18,7 +18,8 @@ A personal investment portfolio monitoring tool with risk analytics, ETF lookthr
 - **Demo mode** — sidebar toggle (or CLI) that switches to a separate `data_demo/` dataset with sample portfolios, so you can screenshot/share without exposing live accounts
 - **Analytics & return production** — scheduled jobs that keep prices, attribution metrics, sector betas, and fund profiles fresh. Run on demand from the dashboard's **⚙️ Production** view, or wire `invest-monitor production run` into cron / systemd for true automation. Run log + an **Issues** tab surfaces any failures.
 - **Streamlit dashboard** — interactive UI across nine tabs per portfolio plus a multi-portfolio dashboard with embedded **agent chat**
-- **AI agents** — three conversational agents powered by Claude (Risk Analyst, Wealth Planner, Research / Capital Deployment), reachable from the CLI **or directly from the dashboard sidebar tabs**. Conversations can be summarised (via Haiku) and stored in `agent_summaries.json`, then loaded as priming context into future chats — even across different agents
+- **AI agents** — five conversational agents powered by Claude: Risk, Wealth, Research, Portfolio Manager, and CIO. PM builds defensible trade proposals (BUY/SELL orders with dollar amounts and share counts, sector-tilt projections); CIO reviews them and produces a structured approve / override / more-research decision. All reachable from the CLI **or directly from the dashboard tabs**. Conversations can be summarised (via Haiku) and stored in `agent_summaries.json`, then loaded as priming context into future chats — even across different agents. **Wealth, PM, and CIO can also export markdown reports** via an `export_report` skill — files land in `<data_dir>/reports/`, scoped to the active dataset
+- **Multi-agent coordination graph** — a LangGraph pipeline (Researcher → Portfolio Manager → Risk Manager → CIO) sharing a single `TradingState`, with a bounded PM ↔ Risk revision loop, `MemorySaver` checkpointing, and an optional human-in-the-loop pause before the CIO signs off. Currently runs end-to-end on deterministic stub nodes; the PM and CIO conversational agents are the human-facing counterparts. See [`docs/multi-agent-graph.md`](docs/multi-agent-graph.md)
 
 ## Project Structure
 
@@ -43,12 +44,23 @@ invest_monitor/
 │   ├── agent_summaries.py # Save + load summaries of past agent conversations
 │   ├── demo.py            # Seed/reset demo dataset (data_demo/)
 │   ├── agent/
-│   │   ├── agent.py           # RiskAgent
-│   │   ├── skills.py          # Risk agent tools (13 skills)
-│   │   ├── wealth_agent.py    # WealthAgent
-│   │   ├── wealth_skills.py   # Wealth agent tools (11 skills)
-│   │   ├── research_agent.py  # ResearchAgent
-│   │   └── research_skills.py # Research tools + server-side web search
+│   │   ├── agent.py                  # RiskAgent
+│   │   ├── skills.py                 # Risk agent tools (13 skills)
+│   │   ├── wealth_agent.py           # WealthAgent
+│   │   ├── wealth_skills.py          # Wealth agent tools (11 skills)
+│   │   ├── research_agent.py         # ResearchAgent
+│   │   ├── research_skills.py        # Research tools + server-side web search
+│   │   ├── portfolio_manager_agent.py # PortfolioManagerAgent
+│   │   ├── pm_skills.py              # PM tools (6 skills: snapshot, propose_trades, …)
+│   │   ├── cio_agent.py              # CIOAgent
+│   │   └── cio_skills.py             # CIO tools (6 skills: holistic_view, review, approve, …)
+│   ├── trading_graph/         # LangGraph multi-agent coordination
+│   │   ├── state.py           # TradingState + reducers
+│   │   ├── config.py          # Settings (HITL, max_revisions, risk thresholds)
+│   │   ├── routing.py         # Conditional-edge functions
+│   │   ├── graph.py           # build_graph() — StateGraph + MemorySaver
+│   │   ├── run.py             # CLI smoke entrypoint
+│   │   └── nodes/             # researcher, portfolio_manager, risk_manager, cio
 │   ├── app.py             # Streamlit dashboard
 │   └── cli.py             # Click CLI entry point
 ├── data/                  # gitignored — live dataset
