@@ -37,16 +37,22 @@ def load(csv_path, name, data_dir):
 @cli.command()
 @click.option("--period", default="1y", help="Collection period (e.g. 1y, 1mo)")
 @click.option("--portfolio", "portfolio_name", default="", help="Collect only for a specific portfolio")
-def collect(period, portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def collect(period, portfolio_name, data_dir):
     """Fetch historical pricing for assets in the database."""
-    db = Database()
-    if portfolio_name:
-        portfolio = db.get_portfolio(portfolio_name)
-        tickers = [pos.asset.ticker for pos in portfolio.positions]
-        Collector(db).collect_prices(tickers, period=period)
-    else:
-        Collector(db).update_all_assets(period=period)
-    click.echo("Collection complete.")
+    from src.services.prices import collect_prices
+    try:
+        result = collect_prices(
+            data_dir, period=period, portfolio_name=portfolio_name or None,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Collection complete: {len(result.tickers_collected)} succeeded, "
+        f"{len(result.tickers_failed)} failed."
+    )
+    for ticker, reason in result.tickers_failed.items():
+        click.echo(f"  ! {ticker}: {reason}")
 
 
 @cli.group()

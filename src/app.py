@@ -21,6 +21,12 @@ from src.services.portfolios import (
     load_portfolio_from_csv as service_load_csv,
     update_positions as service_update_positions,
 )
+from src.services.prices import (
+    collect_prices as service_collect_prices,
+    get_latest_prices as service_get_latest_prices,
+    get_price_history as service_get_price_history,
+    price_history_to_dataframe,
+)
 from src.api.schemas.portfolio import PositionInput
 from src.agent import (
     CIOAgent,
@@ -73,7 +79,8 @@ def load_portfolio_from_upload(uploaded_file, portfolio_name: str) -> Portfolio:
 
 @st.cache_data(ttl=300)
 def _fetch_prices_cached(data_dir: str, tickers: tuple[str, ...]) -> pd.DataFrame:
-    return _make_db(data_dir).get_historical_prices(list(tickers))
+    history = service_get_price_history(data_dir, list(tickers))
+    return price_history_to_dataframe(history)
 
 
 def fetch_prices(tickers: tuple[str, ...]) -> pd.DataFrame:
@@ -81,10 +88,10 @@ def fetch_prices(tickers: tuple[str, ...]) -> pd.DataFrame:
 
 
 def latest_prices(tickers: list[str]) -> dict[str, float]:
-    df = fetch_prices(tuple(tickers))
-    if df.empty:
+    if not tickers:
         return {}
-    return df.iloc[-1].to_dict()
+    response = service_get_latest_prices(_active_data_dir(), tickers)
+    return {t: v for t, v in response.prices.items() if v is not None}
 
 
 def fmt_usd(v) -> str:
@@ -289,7 +296,7 @@ def compute_portfolio_metrics(portfolio: Portfolio) -> dict | None:
     starts.
     """
     tickers = [pos.asset.ticker for pos in portfolio.positions]
-    prices = get_db().get_historical_prices(tickers)
+    prices = fetch_prices(tuple(tickers))
     if prices.empty:
         return None
 
@@ -551,9 +558,15 @@ with st.sidebar:
         period = st.selectbox("Price history period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
         if st.button("Collect Prices"):
             with st.spinner("Fetching from yfinance…"):
-                Collector(get_db()).update_all_assets(period=period)
+                result = service_collect_prices(_active_data_dir(), period=period)
                 _fetch_prices_cached.clear()
-            st.success("Prices updated!")
+            if result.tickers_failed:
+                st.warning(
+                    f"Collected {len(result.tickers_collected)} ticker(s); "
+                    f"{len(result.tickers_failed)} failed."
+                )
+            else:
+                st.success(f"Prices updated for {len(result.tickers_collected)} ticker(s)!")
 
         st.markdown("---")
         if st.button("Delete portfolio", type="secondary"):
