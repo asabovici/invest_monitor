@@ -23,11 +23,15 @@ def cli():
 @cli.command()
 @click.argument("csv_path")
 @click.option("--name", default="", help="Portfolio name (defaults to CSV filename)")
-def load(csv_path, name):
+@click.option("--data-dir", default="data", show_default=True)
+def load(csv_path, name, data_dir):
     """Load a portfolio from a CSV file and save it to the database."""
-    db = Database()
-    portfolio = Ingester(db).load_portfolio_from_csv(csv_path, name)
-    click.echo(f"Saved portfolio '{portfolio.name}' with {len(portfolio.positions)} positions.")
+    from pathlib import Path
+    from src.services.portfolios import load_portfolio_from_csv
+    resolved_name = name or Path(csv_path).stem
+    csv_text = Path(csv_path).read_text(encoding="utf-8")
+    detail = load_portfolio_from_csv(data_dir, resolved_name, csv_text)
+    click.echo(f"Saved portfolio '{detail.name}' with {len(detail.positions)} positions.")
 
 
 @cli.command()
@@ -67,22 +71,27 @@ def portfolio_list(data_dir):
 
 @portfolio.command("create")
 @click.argument("name")
-def portfolio_create(name):
+@click.option("--data-dir", default="data", show_default=True)
+def portfolio_create(name, data_dir):
     """Create an empty portfolio. Add positions later via trades or CSV."""
-    from src.models import Portfolio
-    db = Database()
-    if name in db.list_portfolios():
-        raise click.ClickException(f"Portfolio '{name}' already exists.")
-    db.save_portfolio(Portfolio(name=name, positions=[]))
+    from src.services.portfolios import create_portfolio
+    try:
+        create_portfolio(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Created empty portfolio '{name}'.")
 
 
 @portfolio.command("delete")
 @click.argument("name")
-def portfolio_delete(name):
+@click.option("--data-dir", default="data", show_default=True)
+def portfolio_delete(name, data_dir):
     """Delete a saved portfolio."""
-    db = Database()
-    db.delete_portfolio(name)
+    from src.services.portfolios import delete_portfolio
+    try:
+        delete_portfolio(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Deleted portfolio '{name}'.")
 
 

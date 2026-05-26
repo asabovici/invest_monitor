@@ -14,7 +14,14 @@ from src.data.ingestion import Ingester
 from src.database.database import Database
 from src.models import Asset, AssetType, Portfolio, Position
 from src.reporting import ReportingEngine
-from src.services.portfolios import list_portfolio_names
+from src.services.portfolios import (
+    create_portfolio as service_create_portfolio,
+    delete_portfolio as service_delete_portfolio,
+    list_portfolio_names,
+    load_portfolio_from_csv as service_load_csv,
+    update_positions as service_update_positions,
+)
+from src.api.schemas.portfolio import PositionInput
 from src.agent import (
     CIOAgent,
     PortfolioManagerAgent,
@@ -58,14 +65,10 @@ def get_reporting() -> ReportingEngine:
 
 
 def load_portfolio_from_upload(uploaded_file, portfolio_name: str) -> Portfolio:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = tmp.name
-    try:
-        portfolio = Ingester(get_db()).load_portfolio_from_csv(tmp_path, portfolio_name)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-    return portfolio
+    csv_text = uploaded_file.getbuffer().tobytes().decode("utf-8", errors="replace")
+    service_load_csv(_active_data_dir(), portfolio_name, csv_text)
+    # Return the domain Portfolio for downstream code that expects it.
+    return get_db().get_portfolio(portfolio_name)
 
 
 @st.cache_data(ttl=300)
@@ -452,14 +455,15 @@ with st.sidebar:
             nm = new_pf_name.strip()
             if not nm:
                 st.error("Name is required.")
-            elif nm in list_portfolio_names(_active_data_dir()):
-                st.error(f"Portfolio '{nm}' already exists.")
             else:
-                empty = Portfolio(name=nm, positions=[])
-                get_db().save_portfolio(empty)
-                st.session_state["portfolio"] = empty
-                st.success(f"Created '{nm}'. Add positions in the Trade Blotter tab.")
-                st.rerun()
+                try:
+                    service_create_portfolio(_active_data_dir(), nm)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state["portfolio"] = get_db().get_portfolio(nm)
+                    st.success(f"Created '{nm}'. Add positions in the Trade Blotter tab.")
+                    st.rerun()
 
     # Portfolio groups — tag portfolios so they can be filtered together on
     # the Multi-Portfolio Dashboard (e.g. Taxable, Tax-Free, Retirement).
@@ -553,9 +557,13 @@ with st.sidebar:
 
         st.markdown("---")
         if st.button("Delete portfolio", type="secondary"):
-            get_db().delete_portfolio(p.name)
-            del st.session_state["portfolio"]
-            st.rerun()
+            try:
+                service_delete_portfolio(_active_data_dir(), p.name)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                del st.session_state["portfolio"]
+                st.rerun()
 
     st.markdown("---")
     st.caption("CSV columns: Ticker, Name, Type, Quantity, CostBasis, [Currency, Sector]")
@@ -2934,15 +2942,28 @@ with tab_positions:
 
     if st.button("Save Position Changes", type="primary", key="save_pos"):
         keep = edited_pos[~edited_pos["Delete"]]
-        new_rows = [
-            {"ticker": r["Ticker"], "quantity": r["Quantity"], "cost_basis": r["Cost Basis (per share)"]}
-            for _, r in keep.iterrows()
-            if r["Quantity"] > 0
-        ]
-        db.update_positions_direct(portfolio.name, new_rows)
+        # Preserve each ticker's existing asset metadata — the editor only
+        # changes quantity and cost basis, never asset type / sector / name.
+        existing_assets = {pos.asset.ticker: pos.asset for pos in portfolio.positions}
+        position_inputs = []
+        for _, r in keep.iterrows():
+            if r["Quantity"] <= 0:
+                continue
+            ticker = r["Ticker"]
+            existing = existing_assets.get(ticker)
+            position_inputs.append(PositionInput(
+                ticker=ticker,
+                quantity=float(r["Quantity"]),
+                cost_basis_per_share=float(r["Cost Basis (per share)"]),
+                asset_type=existing.asset_type.value if existing else "Stock",
+                name=existing.name if existing else ticker,
+                sector=existing.sector if existing else None,
+                currency=existing.currency if existing else "USD",
+            ))
+        service_update_positions(_active_data_dir(), portfolio.name, position_inputs)
         st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
         deleted = edited_pos[edited_pos["Delete"]]["Ticker"].tolist()
-        msg = f"Saved. {len(new_rows)} position(s) kept."
+        msg = f"Saved. {len(position_inputs)} position(s) kept."
         if deleted:
             msg += f" Removed: {', '.join(deleted)}."
         st.success(msg)
