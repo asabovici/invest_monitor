@@ -19,11 +19,14 @@ dependencies = [
     "python-dotenv",
     "langgraph",
     "langchain-core",
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "httpx",
 ]
 docs = [
     "mkdocs",

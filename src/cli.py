@@ -52,15 +52,17 @@ def portfolio():
 
 
 @portfolio.command("list")
-def portfolio_list():
+@click.option("--data-dir", default="data", show_default=True,
+              help="Data directory to read from (e.g. 'data' or 'data_demo').")
+def portfolio_list(data_dir):
     """List all saved portfolios."""
-    db = Database()
-    names = db.list_portfolios()
-    if not names:
+    from src.services.portfolios import list_portfolios
+    summaries = list_portfolios(data_dir)
+    if not summaries:
         click.echo("No portfolios saved yet.")
-    else:
-        for name in names:
-            click.echo(f"  {name}")
+        return
+    for s in summaries:
+        click.echo(f"  {s.name}  ({s.position_count} positions, total cost ${s.total_cost:,.2f})")
 
 
 @portfolio.command("create")
@@ -590,6 +592,28 @@ def cio(portfolio_name, query):
         click.echo(agent_instance.run_query(full_query))
     else:
         agent_instance.run_interactive(initial_portfolio=portfolio_name)
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Interface to bind. Use 0.0.0.0 to listen on all interfaces.")
+@click.option("--port", default=8000, type=int, show_default=True)
+@click.option("--data-dir", default=None,
+              help="Set INVEST_MONITOR_DATA_DIR for the server process. "
+                   "Per-request X-Data-Dir headers still override.")
+@click.option("--reload", is_flag=True, help="Enable uvicorn auto-reload (development).")
+def serve(host, port, data_dir, reload):
+    """Run the invest-monitor HTTP API (FastAPI + uvicorn).
+
+    All read/write traffic from future frontends goes through this server.
+    Streamlit can also call into the same service layer in-process — it
+    does not need this server to be running.
+    """
+    import os
+    import uvicorn
+    if data_dir:
+        os.environ["INVEST_MONITOR_DATA_DIR"] = data_dir
+    uvicorn.run("src.api.main:app", host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from src.data.ingestion import Ingester
 from src.database.database import Database
 from src.models import Asset, AssetType, Portfolio, Position
 from src.reporting import ReportingEngine
+from src.services.portfolios import list_portfolio_names
 from src.agent import (
     CIOAgent,
     PortfolioManagerAgent,
@@ -423,7 +424,7 @@ with st.sidebar:
     st.markdown("---")
 
     # Portfolio selector (saved portfolios)
-    saved = get_db().list_portfolios()
+    saved = list_portfolio_names(_active_data_dir())
     if saved:
         selected_name = st.selectbox("Select portfolio", options=saved)
         if st.button("Open", type="primary"):
@@ -451,7 +452,7 @@ with st.sidebar:
             nm = new_pf_name.strip()
             if not nm:
                 st.error("Name is required.")
-            elif nm in get_db().list_portfolios():
+            elif nm in list_portfolio_names(_active_data_dir()):
                 st.error(f"Portfolio '{nm}' already exists.")
             else:
                 empty = Portfolio(name=nm, positions=[])
@@ -464,7 +465,7 @@ with st.sidebar:
     # the Multi-Portfolio Dashboard (e.g. Taxable, Tax-Free, Retirement).
     with st.expander("🏷 Portfolio Groups"):
         _gdb = get_db()
-        _all_pfs = _gdb.list_portfolios()
+        _all_pfs = list_portfolio_names(_active_data_dir())
         existing_groups = _gdb.list_groups()
 
         # Create a new group
@@ -564,7 +565,7 @@ with st.sidebar:
 if view == "Multi-Portfolio Dashboard":
     st.title("Multi-Portfolio Dashboard")
 
-    all_portfolio_names = get_db().list_portfolios()
+    all_portfolio_names = list_portfolio_names(_active_data_dir())
     if not all_portfolio_names:
         st.info("No portfolios found. Import a portfolio CSV in the sidebar.")
         st.stop()
@@ -2983,7 +2984,7 @@ with tab_positions:
                     # if the ticker already has a position)
                     db._apply_trade_to_positions(portfolio.name, new_ticker, "BUY", new_qty, new_cost)
                     # Ensure portfolio record exists
-                    if portfolio.name not in db.list_portfolios():
+                    if portfolio.name not in list_portfolio_names(_active_data_dir()):
                         db.save_portfolio(portfolio)
                     st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
                     st.success(f"Added {new_ticker} × {new_qty} @ {new_cost:.4f}")
@@ -3107,7 +3108,7 @@ with tab_trades:
             with col_t1:
                 t_portfolio = st.selectbox(
                     "Portfolio *",
-                    options=db.list_portfolios() or [portfolio.name],
+                    options=list_portfolio_names(_active_data_dir()) or [portfolio.name],
                     index=0,
                 )
                 t_ticker = st.text_input("Ticker *", placeholder="e.g. AAPL").strip().upper()
@@ -3137,7 +3138,7 @@ with tab_trades:
                     st.info(f"{t_ticker} was not in the security master — added with default type Stock. Update it in the Security Master tab.")
 
                 # Ensure portfolio record exists
-                if t_portfolio not in db.list_portfolios():
+                if t_portfolio not in list_portfolio_names(_active_data_dir()):
                     st.error(f"Portfolio '{t_portfolio}' not found.")
                 else:
                     db.record_trade(
