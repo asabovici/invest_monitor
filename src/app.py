@@ -27,6 +27,12 @@ from src.services.prices import (
     get_price_history as service_get_price_history,
     price_history_to_dataframe,
 )
+from src.services.reports import (
+    covariance_to_dataframe,
+    income_projection as service_income_projection,
+    income_report_to_dataframe,
+    risk_metrics as service_risk_metrics,
+)
 from src.api.schemas.portfolio import PositionInput
 from src.agent import (
     CIOAgent,
@@ -974,15 +980,17 @@ if view == "Multi-Portfolio Dashboard":
         "(Stock/ETF/Fund). Driven by **income_rate** in the Security Master."
     )
 
-    _reporting = get_reporting()
     all_income_rows = []
     income_by_portfolio = {}
     for pname, p in portfolios_by_name.items():
-        df_inc = _reporting.compute_portfolio_income(p, latest_prices=latest)
+        income_report = service_income_projection(
+            _active_data_dir(), pname, latest_prices=latest,
+        )
+        df_inc = income_report_to_dataframe(income_report)
         if not df_inc.empty:
             df_inc.insert(0, "Portfolio", pname)
             all_income_rows.append(df_inc)
-            income_by_portfolio[pname] = float(df_inc["Annual Income"].sum())
+            income_by_portfolio[pname] = income_report.total_annual_income
 
     if all_income_rows:
         income_df = pd.concat(all_income_rows, ignore_index=True)
@@ -2597,13 +2605,13 @@ with tab_risk:
         st.warning("No price data found. Use **Collect Prices** in the sidebar first.")
     elif portfolio.positions and not prices_df_risk.empty:
         try:
-            metrics = reporting.get_portfolio_risk_metrics(portfolio)
-            cov_matrix: pd.DataFrame = metrics.pop("Covariance Matrix")
+            risk_report = service_risk_metrics(_active_data_dir(), portfolio.name)
+            cov_matrix: pd.DataFrame = covariance_to_dataframe(risk_report)
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("Annualised Volatility", fmt_pct(metrics["Volatility"] * 100))
-            m2.metric("Historical VaR (95%, 1d)", fmt_pct(metrics["Historical VaR (95%)"] * 100))
-            m3.metric("Monte Carlo VaR (95%, 1d)", fmt_pct(metrics["Monte Carlo VaR (95%)"] * 100))
+            m1.metric("Annualised Volatility", fmt_pct(risk_report.annualised_volatility * 100))
+            m2.metric("Historical VaR (95%, 1d)", fmt_pct(risk_report.historical_var_95 * 100))
+            m3.metric("Monte Carlo VaR (95%, 1d)", fmt_pct(risk_report.monte_carlo_var_95 * 100))
 
             st.markdown("---")
 
@@ -2840,7 +2848,10 @@ with tab_income:
     if not portfolio.positions:
         st.info("No positions yet. Add some via the **📋 Trades** tab.")
     else:
-        inc_df = reporting.compute_portfolio_income(portfolio, latest_prices=cur_prices)
+        income_report = service_income_projection(
+            _active_data_dir(), portfolio.name, latest_prices=cur_prices,
+        )
+        inc_df = income_report_to_dataframe(income_report)
         base_total   = float(inc_df["Base Value"].sum()) if not inc_df.empty else 0.0
         annual_total = float(inc_df["Annual Income"].sum()) if not inc_df.empty else 0.0
         yield_pct    = (annual_total / base_total * 100.0) if base_total else 0.0
