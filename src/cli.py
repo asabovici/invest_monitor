@@ -186,69 +186,85 @@ def group():
 
 
 @group.command("list")
-def group_list():
+@click.option("--data-dir", default="data", show_default=True)
+def group_list(data_dir):
     """List all groups + their members."""
-    db = Database()
-    names = db.list_groups()
-    if not names:
+    from src.services.groups import list_groups
+    infos = list_groups(data_dir)
+    if not infos:
         click.echo("No groups defined.")
         return
-    for name in names:
-        members = db.get_group_members(name)
-        desc = db.get_group_description(name) or ""
-        click.echo(f"\n{name}" + (f"  — {desc}" if desc else ""))
-        click.echo(f"  Members ({len(members)}): {', '.join(members) if members else '—'}")
+    for info in infos:
+        click.echo(f"\n{info.name}" + (f"  — {info.description}" if info.description else ""))
+        members = info.members
+        click.echo(f"  Members ({info.member_count}): {', '.join(members) if members else '—'}")
 
 
 @group.command("create")
 @click.argument("name")
 @click.option("--description", default="", help="Optional description for the group.")
-def group_create(name, description):
+@click.option("--data-dir", default="data", show_default=True)
+def group_create(name, description, data_dir):
     """Create (or update the description of) a group."""
-    db = Database()
-    db.create_group(name, description=description)
+    from src.services.groups import create_group
+    try:
+        create_group(data_dir, name, description=description)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Group '{name}' ready.")
 
 
 @group.command("add")
 @click.argument("group_name")
 @click.argument("portfolio_name")
-def group_add(group_name, portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_add(group_name, portfolio_name, data_dir):
     """Add a portfolio to a group."""
-    db = Database()
-    if group_name not in db.list_groups():
-        raise click.ClickException(f"Group '{group_name}' does not exist. Create it first.")
-    if portfolio_name not in db.list_portfolios():
-        raise click.ClickException(f"Portfolio '{portfolio_name}' does not exist.")
-    db.add_to_group(group_name, portfolio_name)
+    from src.services.groups import add_to_group
+    try:
+        add_to_group(data_dir, group_name, portfolio_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Added '{portfolio_name}' to '{group_name}'.")
 
 
 @group.command("remove")
 @click.argument("group_name")
 @click.argument("portfolio_name")
-def group_remove(group_name, portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_remove(group_name, portfolio_name, data_dir):
     """Remove a portfolio from a group."""
-    db = Database()
-    db.remove_from_group(group_name, portfolio_name)
+    from src.services.groups import remove_from_group
+    try:
+        remove_from_group(data_dir, group_name, portfolio_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Removed '{portfolio_name}' from '{group_name}'.")
 
 
 @group.command("delete")
 @click.argument("name")
-def group_delete(name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_delete(name, data_dir):
     """Delete a group and clear all its memberships (portfolios are untouched)."""
-    db = Database()
-    db.delete_group(name)
+    from src.services.groups import delete_group
+    try:
+        delete_group(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Deleted group '{name}'.")
 
 
 @group.command("show")
 @click.argument("portfolio_name")
-def group_show(portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_show(portfolio_name, data_dir):
     """Show which groups a portfolio belongs to."""
-    db = Database()
-    groups = db.get_groups_for_portfolio(portfolio_name)
+    from src.services.groups import get_groups_for_portfolio
+    try:
+        groups = get_groups_for_portfolio(data_dir, portfolio_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     if not groups:
         click.echo(f"'{portfolio_name}' is not in any group.")
     else:

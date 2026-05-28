@@ -490,9 +490,9 @@ with st.sidebar:
     # Portfolio groups — tag portfolios so they can be filtered together on
     # the Multi-Portfolio Dashboard (e.g. Taxable, Tax-Free, Retirement).
     with st.expander("🏷 Portfolio Groups"):
-        _gdb = get_db()
         _all_pfs = list_portfolio_names(_active_data_dir())
-        existing_groups = _gdb.list_groups()
+        existing_group_infos = service_list_groups(_active_data_dir())
+        existing_groups = [g.name for g in existing_group_infos]
 
         # Create a new group
         st.markdown("**Create / update**")
@@ -509,9 +509,13 @@ with st.sidebar:
             if not nm:
                 st.error("Group name is required.")
             else:
-                _gdb.create_group(nm, description=new_g_desc.strip())
-                st.success(f"Group '{nm}' saved. Add members below.")
-                st.rerun()
+                try:
+                    service_create_group(_active_data_dir(), nm, description=new_g_desc.strip())
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.success(f"Group '{nm}' saved. Add members below.")
+                    st.rerun()
 
         if existing_groups:
             st.markdown("---")
@@ -519,7 +523,11 @@ with st.sidebar:
             sel_group = st.selectbox(
                 "Select group", existing_groups, key="group_manage_select",
             )
-            current_members = _gdb.get_group_members(sel_group)
+            sel_info = next(
+                (g for g in existing_group_infos if g.name == sel_group),
+                None,
+            )
+            current_members = sel_info.members if sel_info else []
             new_members = st.multiselect(
                 "Members", _all_pfs, default=current_members,
                 key=f"group_members_{sel_group}",
@@ -527,17 +535,25 @@ with st.sidebar:
             col_save, col_del = st.columns(2)
             with col_save:
                 if st.button("Save members", key=f"group_save_{sel_group}"):
-                    _gdb.set_group_members(sel_group, new_members)
-                    st.success(
-                        f"Group '{sel_group}' has {len(new_members)} portfolio(s)."
-                    )
-                    st.rerun()
+                    try:
+                        service_set_group_members(_active_data_dir(), sel_group, new_members)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(
+                            f"Group '{sel_group}' has {len(new_members)} portfolio(s)."
+                        )
+                        st.rerun()
             with col_del:
                 if st.button("Delete group", key=f"group_del_{sel_group}",
                              type="secondary"):
-                    _gdb.delete_group(sel_group)
-                    st.success(f"Deleted group '{sel_group}'.")
-                    st.rerun()
+                    try:
+                        service_delete_group(_active_data_dir(), sel_group)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(f"Deleted group '{sel_group}'.")
+                        st.rerun()
         else:
             st.caption("No groups yet. Create one above to start filtering the dashboard.")
 
@@ -563,7 +579,10 @@ with st.sidebar:
 
     if "portfolio" in st.session_state:
         p: Portfolio = st.session_state["portfolio"]
-        _active_groups = get_db().get_groups_for_portfolio(p.name)
+        try:
+            _active_groups = service_get_groups_for_portfolio(_active_data_dir(), p.name)
+        except ValueError:
+            _active_groups = []
         st.markdown(
             f"**Active:** {p.name} ({len(p.positions)} positions)"
             + (f"  \n🏷 {', '.join(_active_groups)}" if _active_groups else "")
@@ -611,7 +630,7 @@ if view == "Multi-Portfolio Dashboard":
     # single group (e.g. "Taxable" or "Tax-Free"). "All portfolios" is the
     # default and matches pre-groups behaviour. Filtering portfolio_names here
     # cascades to every downstream section since they all derive from it.
-    _all_groups = get_db().list_groups()
+    _all_groups = [g.name for g in service_list_groups(_active_data_dir())]
     # Default: not in combined mode. Flipped on below when the user picks a
     # group AND toggles "View as combined portfolio".
     combined_view = False
@@ -633,7 +652,11 @@ if view == "Multi-Portfolio Dashboard":
                 ),
             )
         if group_choice != ALL_OPTION:
-            members = set(get_db().get_group_members(group_choice))
+            _group_info = next(
+                (g for g in service_list_groups(_active_data_dir()) if g.name == group_choice),
+                None,
+            )
+            members = set(_group_info.members) if _group_info else set()
             portfolio_names = [p for p in all_portfolio_names if p in members]
             if not portfolio_names:
                 st.warning(
@@ -652,7 +675,7 @@ if view == "Multi-Portfolio Dashboard":
                         "Useful for comparing the whole group against benchmarks."
                     ),
                 )
-            desc = get_db().get_group_description(group_choice)
+            desc = _group_info.description if _group_info else ""
             st.caption(
                 f"Showing **{group_choice}** ({len(portfolio_names)} of "
                 f"{len(all_portfolio_names)} portfolios)"
@@ -2325,10 +2348,12 @@ with tab_overview:
     cur_prices = latest_prices(tickers)
 
     # ── Quick-edit group memberships ───────────────────────────────────────────
-    _ov_db = get_db()
-    _ov_all_groups = _ov_db.list_groups()
+    _ov_all_groups = [g.name for g in service_list_groups(_active_data_dir())]
     if _ov_all_groups:
-        _ov_current = _ov_db.get_groups_for_portfolio(portfolio.name)
+        try:
+            _ov_current = service_get_groups_for_portfolio(_active_data_dir(), portfolio.name)
+        except ValueError:
+            _ov_current = []
         col_g, col_save = st.columns([5, 1])
         with col_g:
             _ov_picked = st.multiselect(
@@ -2347,11 +2372,15 @@ with tab_overview:
             st.write("")  # vertical alignment with the multiselect
             if set(_ov_picked) != set(_ov_current):
                 if st.button("Save groups", key="overview_save_groups", type="primary"):
-                    _ov_db.set_groups_for_portfolio(portfolio.name, _ov_picked)
-                    st.success(
-                        f"Groups for **{portfolio.name}**: "
-                        f"{', '.join(_ov_picked) if _ov_picked else '— none —'}"
-                    )
+                    try:
+                        service_set_groups_for_portfolio(_active_data_dir(), portfolio.name, _ov_picked)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(
+                            f"Groups for **{portfolio.name}**: "
+                            f"{', '.join(_ov_picked) if _ov_picked else '— none —'}"
+                        )
                     st.rerun()
     else:
         st.caption(
@@ -3204,32 +3233,56 @@ with tab_trades:
                 if t_portfolio not in list_portfolio_names(_active_data_dir()):
                     st.error(f"Portfolio '{t_portfolio}' not found.")
                 else:
-                    db.record_trade(
-                        portfolio_name=t_portfolio,
-                        ticker=t_ticker,
-                        side=t_side,
-                        quantity=t_quantity,
-                        trade_price=t_price,
-                        trade_date=str(t_date),
-                    )
-                    # Refresh active portfolio if it's the one we traded in
-                    if t_portfolio == portfolio.name:
-                        st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
+                    try:
+                        service_record_trade(
+                            _active_data_dir(),
+                            RecordTradeRequest(
+                                portfolio_name=t_portfolio,
+                                ticker=t_ticker,
+                                side=t_side,
+                                quantity=t_quantity,
+                                trade_price=t_price,
+                                trade_date=t_date,
+                            ),
+                        )
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        # Refresh active portfolio if it's the one we traded in
+                        if t_portfolio == portfolio.name:
+                            st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
 
-                    notional = t_quantity * t_price
-                    st.success(
-                        f"{'Bought' if t_side == 'BUY' else 'Sold'} {t_quantity:,.4f} × "
-                        f"{t_ticker} @ ${t_price:,.4f} = ${notional:,.2f} "
-                        f"in '{t_portfolio}' on {t_date}."
-                    )
-                    st.rerun()
+                        notional = t_quantity * t_price
+                        st.success(
+                            f"{'Bought' if t_side == 'BUY' else 'Sold'} {t_quantity:,.4f} × "
+                            f"{t_ticker} @ ${t_price:,.4f} = ${notional:,.2f} "
+                            f"in '{t_portfolio}' on {t_date}."
+                        )
+                        st.rerun()
 
     st.markdown("---")
 
     # ── Trade history ─────────────────────────────────────────────────────────
     st.subheader("Trade History")
     show_all = st.checkbox("Show all portfolios", value=False)
-    trades_df = db.list_trades(None if show_all else portfolio.name)
+    _trade_list = service_list_trades(
+        _active_data_dir(), portfolio_name=None if show_all else portfolio.name,
+    )
+    trades_df = pd.DataFrame([
+        {
+            "trade_id": t.trade_id,
+            "portfolio_name": t.portfolio_name,
+            "ticker": t.ticker,
+            "side": t.side,
+            "quantity": t.quantity,
+            "trade_price": t.trade_price,
+            "trade_date": t.trade_date,
+        }
+        for t in _trade_list.trades
+    ]) if _trade_list.trades else pd.DataFrame(columns=[
+        "trade_id", "portfolio_name", "ticker", "side",
+        "quantity", "trade_price", "trade_date",
+    ])
 
     if trades_df.empty:
         st.info("No trades recorded yet.")

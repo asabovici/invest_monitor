@@ -12,6 +12,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Response, status
 
 from src.api.deps import data_dir_dep
+from src.services.schemas.group import SetPortfolioGroupsRequest
 from src.services.schemas.portfolio import (
     CreatePortfolioRequest,
     LoadCsvRequest,
@@ -19,7 +20,10 @@ from src.services.schemas.portfolio import (
     PortfolioSummary,
     UpdatePositionsRequest,
 )
+from src.services.schemas.trade import TradeList
+from src.services import groups as groups_service
 from src.services import portfolios as portfolios_service
+from src.services import trades as trades_service
 
 router = APIRouter(prefix="/portfolios", tags=["portfolios"])
 
@@ -86,3 +90,34 @@ def update_positions(
 ) -> PortfolioDetail:
     """Replace all positions for a portfolio. 404 if portfolio missing."""
     return portfolios_service.update_positions(data_dir, name, body.positions)
+
+
+# ── Related-resource convenience endpoints ──────────────────────────────────
+
+
+@router.get("/{name}/groups", response_model=list[str])
+def get_portfolio_groups(
+    name: str,
+    data_dir: Annotated[str, Depends(data_dir_dep)],
+) -> list[str]:
+    """Groups containing this portfolio. 404 if portfolio missing."""
+    return groups_service.get_groups_for_portfolio(data_dir, name)
+
+
+@router.put("/{name}/groups", response_model=list[str])
+def set_portfolio_groups(
+    name: str,
+    body: SetPortfolioGroupsRequest,
+    data_dir: Annotated[str, Depends(data_dir_dep)],
+) -> list[str]:
+    """Replace the group memberships for this portfolio. 400 on unknown groups."""
+    return groups_service.set_groups_for_portfolio(data_dir, name, body.group_names)
+
+
+@router.get("/{name}/trades", response_model=TradeList)
+def get_portfolio_trades(
+    name: str,
+    data_dir: Annotated[str, Depends(data_dir_dep)],
+) -> TradeList:
+    """Trade ledger for this portfolio, newest-first."""
+    return trades_service.list_trades(data_dir, portfolio_name=name)

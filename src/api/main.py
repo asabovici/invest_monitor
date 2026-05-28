@@ -10,7 +10,15 @@ from fastapi import FastAPI
 
 from src.api.errors import register_error_handlers
 from src.api.middleware import DEFAULT_MAX_BODY_BYTES, BodySizeLimitMiddleware
-from src.api.routers import benchmarks, portfolios, prices, reports, scenarios
+from src.api.routers import (
+    benchmarks,
+    groups,
+    portfolios,
+    prices,
+    reports,
+    scenarios,
+    trades,
+)
 
 app = FastAPI(
     title="invest-monitor API",
@@ -35,6 +43,8 @@ app.include_router(prices.router)
 app.include_router(reports.router)
 app.include_router(scenarios.router)
 app.include_router(benchmarks.router)
+app.include_router(groups.router)
+app.include_router(trades.router)
 
 
 @app.get("/health", tags=["meta"])
