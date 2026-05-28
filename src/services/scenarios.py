@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.api.schemas.scenario import (
+from src.services.schemas.scenario import (
     MCScenarioInfo,
     MCScenarioPhaseInfo,
     RegimePresetInfo,
@@ -17,7 +17,7 @@ from src.api.schemas.scenario import (
     StressShockRow,
     StressTestResult,
 )
-from src.database import Database
+from src.services._db import _get_db
 from src.reporting import ReportingEngine
 from src.scenarios import (
     NON_EQUITY_SHOCKS,
@@ -98,7 +98,7 @@ def run_sector_stress(
     Raises:
         ValueError: portfolio not found, or ``scenario_id`` unknown.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     portfolio = db.get_portfolio(portfolio_name)  # raises if missing
 
     sector_shocks: dict[str, float] = {}

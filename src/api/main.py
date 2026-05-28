@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from src.api.errors import register_error_handlers
+from src.api.middleware import DEFAULT_MAX_BODY_BYTES, BodySizeLimitMiddleware
 from src.api.routers import benchmarks, portfolios, prices, reports, scenarios
 
 app = FastAPI(
@@ -16,9 +18,17 @@ app = FastAPI(
     description=(
         "Typed HTTP surface in front of the invest-monitor service layer. "
         "Streamlit, the Click CLI, and any future frontend all consume "
-        "the same endpoints."
+        "the same endpoints.\n\n"
+        f"Request bodies are capped at {DEFAULT_MAX_BODY_BYTES:,} bytes "
+        "(see ``src.api.middleware``). Note that ``POST /prices/collect`` is "
+        "synchronous and long-running — each ticker triggers an outbound "
+        "yfinance download, so a single request can hold a worker for "
+        "minutes when run against a large portfolio."
     ),
 )
+
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=DEFAULT_MAX_BODY_BYTES)
+register_error_handlers(app)
 
 app.include_router(portfolios.router)
 app.include_router(prices.router)

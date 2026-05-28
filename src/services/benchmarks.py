@@ -11,7 +11,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from src.api.schemas.benchmark import (
+from src.services.schemas.benchmark import (
     BenchmarkComparison,
     BenchmarkInfo,
     BenchmarkReturnsSeries,
@@ -22,7 +22,7 @@ from src.benchmarks import (
     benchmark_daily_returns as _bench_daily,
     benchmark_stats as _bench_stats,
 )
-from src.database import Database
+from src.services._db import _get_db
 
 
 # ── Catalogue ────────────────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ def list_benchmarks() -> list[BenchmarkInfo]:
 
 def _resolve_benchmark(benchmark_name: str):
     if benchmark_name not in BENCHMARKS:
-        raise ValueError(f"Unknown benchmark: {benchmark_name!r}")
+        raise ValueError(f"Benchmark {benchmark_name!r} not found.")
     return BENCHMARKS[benchmark_name]
 
 
@@ -60,7 +60,7 @@ def benchmark_returns(
 ) -> BenchmarkReturnsSeries:
     """Daily + cumulative returns for a benchmark, optionally from ``start``."""
     bench = _resolve_benchmark(benchmark_name)
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     start_str = start.isoformat() if isinstance(start, date) else start
     daily = _bench_daily(bench, db, start_date=start_str)
     cum = (1.0 + daily).cumprod() - 1.0 if not daily.empty else daily
@@ -82,7 +82,7 @@ def benchmark_stats(
 ) -> BenchmarkStats:
     """Period return, annualised vol, max drawdown for the named benchmark."""
     bench = _resolve_benchmark(benchmark_name)
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     start_str = start.isoformat() if isinstance(start, date) else start
     stats = _bench_stats(bench, db, start_date=start_str)
     return BenchmarkStats(
@@ -113,7 +113,7 @@ def compare_to_benchmark(
         ValueError: benchmark unknown, or portfolio not found.
     """
     bench = _resolve_benchmark(benchmark_name)
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     # Verify the portfolio exists in the portfolios table even if its daily
     # metrics haven't been refreshed yet.
     if portfolio_name not in db.list_portfolios():

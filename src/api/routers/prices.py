@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from src.api.deps import data_dir_dep
-from src.api.schemas.price import (
+from src.services.schemas.price import (
     CollectPricesRequest,
     CollectionResult,
     LatestPriceResponse,
@@ -63,10 +63,19 @@ def collect_prices(
     body: CollectPricesRequest,
     data_dir: Annotated[str, Depends(data_dir_dep)],
 ) -> CollectionResult:
-    """Fetch prices from yfinance and store them. 404 if portfolio_name is unknown."""
-    try:
-        return prices_service.collect_prices(
-            data_dir, period=body.period, portfolio_name=body.portfolio_name
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    """Fetch prices from yfinance and store them.
+
+    **Long-running, synchronous.** Each ticker triggers an outbound yfinance
+    download. A request covering dozens of tickers can hold the worker for
+    minutes. Set generous client timeouts and avoid running this against a
+    web-facing instance under load. A streaming / background-job version is
+    planned for the production-jobs slice.
+
+    Failures are recorded per-ticker in ``CollectionResult.tickers_failed``
+    rather than aborting the batch; a single bad ticker won't drop the rest.
+
+    404 if ``portfolio_name`` is unknown.
+    """
+    return prices_service.collect_prices(
+        data_dir, period=body.period, portfolio_name=body.portfolio_name,
+    )

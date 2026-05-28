@@ -6,16 +6,19 @@ Slice 3 of the API refactor — see API_REFACTOR_PLAN.md §5.
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import pandas as pd
 
-from src.api.schemas.price import (
+if TYPE_CHECKING:
+    from src.database import Database
+
+from src.services.schemas.price import (
     CollectionResult,
     LatestPriceResponse,
     PriceHistory,
 )
-from src.database import Database
+from src.services._db import _get_db
 
 
 # ── Reads ──────────────────────────────────────────────────────────────────────
@@ -32,7 +35,7 @@ def get_latest_prices(data_dir: str, tickers: Iterable[str]) -> LatestPriceRespo
     if not tickers:
         return LatestPriceResponse(prices={})
 
-    df = Database(data_dir).get_historical_prices(tickers)
+    df = _get_db(data_dir).get_historical_prices(tickers)
     latest: dict[str, float | None] = {}
     for t in tickers:
         if df.empty or t not in df.columns:
@@ -57,7 +60,7 @@ def get_price_history(
     tickers = list(tickers)
     start_str = start.isoformat() if isinstance(start, date) else start
 
-    df = Database(data_dir).get_historical_prices(tickers, start_date=start_str)
+    df = _get_db(data_dir).get_historical_prices(tickers, start_date=start_str)
     if df.empty:
         return PriceHistory(tickers=tickers, dates=[], prices={t: [] for t in tickers})
 
@@ -102,7 +105,7 @@ def collect_prices(
     rather than raising — bulk collection should not abort on one bad
     ticker.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     if portfolio_name:
         portfolio = db.get_portfolio(portfolio_name)  # raises ValueError if missing
         tickers = [pos.asset.ticker for pos in portfolio.positions]

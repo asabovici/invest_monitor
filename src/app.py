@@ -42,7 +42,7 @@ from src.services.benchmarks import (
     benchmark_stats as service_benchmark_stats,
     list_benchmarks as service_list_benchmarks,
 )
-from src.api.schemas.portfolio import PositionInput
+from src.services.schemas.portfolio import PositionInput
 from src.agent import (
     CIOAgent,
     PortfolioManagerAgent,

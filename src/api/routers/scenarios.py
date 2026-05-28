@@ -1,13 +1,17 @@
-"""HTTP routes for scenarios (slice 5)."""
+"""HTTP routes for scenarios (slice 5).
+
+Service-layer ValueErrors are translated to 404/400 by the global handler
+in ``src.api.errors``.
+"""
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 
 from src.api.deps import data_dir_dep
-from src.api.schemas.scenario import (
+from src.services.schemas.scenario import (
     MCScenarioInfo,
     RegimePresetInfo,
     StressScenarioInfo,
@@ -48,15 +52,10 @@ def run_sector_stress(
     404 if the portfolio doesn't exist; 400 if the scenario_id is unknown or
     no shocks were specified.
     """
-    try:
-        return scenarios_service.run_sector_stress(
-            data_dir,
-            portfolio_name,
-            scenario_id=body.scenario_id,
-            custom_sector_shocks=body.custom_sector_shocks,
-            custom_non_equity_shocks=body.custom_non_equity_shocks,
-        )
-    except ValueError as exc:
-        msg = str(exc)
-        code = status.HTTP_404_NOT_FOUND if "not found" in msg.lower() else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(status_code=code, detail=msg) from exc
+    return scenarios_service.run_sector_stress(
+        data_dir,
+        portfolio_name,
+        scenario_id=body.scenario_id,
+        custom_sector_shocks=body.custom_sector_shocks,
+        custom_non_equity_shocks=body.custom_non_equity_shocks,
+    )

@@ -1,13 +1,18 @@
-"""HTTP routes for portfolios (slices 1 + 2)."""
+"""HTTP routes for portfolios (slices 1 + 2).
+
+Per-route ``try/except ValueError`` blocks are not needed — the global
+handler registered in ``src.api.errors`` translates service-layer
+``ValueError``s to the right HTTP status based on the message phrasing.
+"""
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Response, status
 
 from src.api.deps import data_dir_dep
-from src.api.schemas.portfolio import (
+from src.services.schemas.portfolio import (
     CreatePortfolioRequest,
     LoadCsvRequest,
     PortfolioDetail,
@@ -32,11 +37,8 @@ def get_portfolio(
     name: str,
     data_dir: Annotated[str, Depends(data_dir_dep)],
 ) -> PortfolioDetail:
-    """Return one portfolio with all positions."""
-    try:
-        return portfolios_service.get_portfolio(data_dir, name)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    """Return one portfolio with all positions. 404 if missing."""
+    return portfolios_service.get_portfolio(data_dir, name)
 
 
 @router.post(
@@ -49,12 +51,7 @@ def create_portfolio(
     data_dir: Annotated[str, Depends(data_dir_dep)],
 ) -> PortfolioDetail:
     """Create an empty portfolio. 409 if a portfolio with that name exists."""
-    try:
-        return portfolios_service.create_portfolio(data_dir, body.name)
-    except ValueError as exc:
-        msg = str(exc)
-        code = status.HTTP_409_CONFLICT if "already exists" in msg else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(status_code=code, detail=msg) from exc
+    return portfolios_service.create_portfolio(data_dir, body.name)
 
 
 @router.delete("/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -63,10 +60,7 @@ def delete_portfolio(
     data_dir: Annotated[str, Depends(data_dir_dep)],
 ) -> Response:
     """Delete a portfolio. 404 if it does not exist."""
-    try:
-        portfolios_service.delete_portfolio(data_dir, name)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    portfolios_service.delete_portfolio(data_dir, name)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -75,11 +69,13 @@ def load_portfolio_from_csv(
     body: LoadCsvRequest,
     data_dir: Annotated[str, Depends(data_dir_dep)],
 ) -> PortfolioDetail:
-    """Upsert a portfolio from CSV text. Replaces positions if the portfolio exists."""
-    try:
-        return portfolios_service.load_portfolio_from_csv(data_dir, body.name, body.csv_text)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    """Upsert a portfolio from CSV text. Replaces positions if the portfolio exists.
+
+    Request body is capped at the server-wide limit configured in
+    ``src.api.middleware`` (default 10 MB) to keep oversized uploads from
+    pinning a worker.
+    """
+    return portfolios_service.load_portfolio_from_csv(data_dir, body.name, body.csv_text)
 
 
 @router.put("/{name}/positions", response_model=PortfolioDetail)
@@ -89,9 +85,4 @@ def update_positions(
     data_dir: Annotated[str, Depends(data_dir_dep)],
 ) -> PortfolioDetail:
     """Replace all positions for a portfolio. 404 if portfolio missing."""
-    try:
-        return portfolios_service.update_positions(data_dir, name, body.positions)
-    except ValueError as exc:
-        msg = str(exc)
-        code = status.HTTP_404_NOT_FOUND if "does not exist" in msg else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(status_code=code, detail=msg) from exc
+    return portfolios_service.update_positions(data_dir, name, body.positions)

@@ -8,12 +8,15 @@ alongside the production runner.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 import pandas as pd
 
-from src.api.schemas.report import (
+if TYPE_CHECKING:
+    from src.database import Database
+
+from src.services.schemas.report import (
     AttributionContributor,
     AttributionReport,
     CorrelationReport,
@@ -23,7 +26,7 @@ from src.api.schemas.report import (
     IncomeProjectionRow,
     RiskMetricsReport,
 )
-from src.database import Database
+from src.services._db import _get_db
 from src.reporting import ReportingEngine
 
 
@@ -63,7 +66,7 @@ def risk_metrics(data_dir: str, portfolio_name: str) -> RiskMetricsReport:
     Raises:
         ValueError: portfolio not found.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     portfolio = _require_portfolio(db, portfolio_name)
     metrics = ReportingEngine(db).get_portfolio_risk_metrics(portfolio)
 
@@ -98,7 +101,7 @@ def exposure(data_dir: str, portfolio_name: str) -> ExposureReport:
     Raises:
         ValueError: portfolio not found.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     portfolio = _require_portfolio(db, portfolio_name)
 
     rows_raw: list[dict] = []
@@ -155,7 +158,7 @@ def income_projection(
     Raises:
         ValueError: portfolio not found.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     portfolio = _require_portfolio(db, portfolio_name)
     df = ReportingEngine(db).compute_portfolio_income(portfolio, latest_prices=latest_prices)
 
@@ -191,7 +194,7 @@ def correlation_matrix(data_dir: str, portfolio_name: str) -> CorrelationReport:
     Raises:
         ValueError: portfolio not found.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     portfolio = _require_portfolio(db, portfolio_name)
     tickers = [pos.asset.ticker for pos in portfolio.positions]
     if not tickers:
@@ -224,7 +227,7 @@ def attribution(
         ValueError: portfolio not found in the portfolios table (we
             check this even if no daily metrics exist yet).
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     _require_portfolio(db, portfolio_name)
 
     start_str = start.isoformat() if isinstance(start, date) else (start or None)

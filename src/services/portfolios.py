@@ -9,7 +9,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from src.api.schemas.portfolio import (
+from src.services.schemas.portfolio import (
     LoadCsvRequest,
     PortfolioDetail,
     PortfolioSummary,
@@ -17,7 +17,7 @@ from src.api.schemas.portfolio import (
     PositionView,
 )
 from src.data.ingestion import Ingester
-from src.database import Database
+from src.services._db import _get_db
 from src.models import Asset, AssetType, Portfolio, Position
 
 
@@ -48,12 +48,12 @@ def list_portfolio_names(data_dir: str) -> list[str]:
     selectors, membership checks). API responses prefer ``list_portfolios``,
     which adds position count and total cost.
     """
-    return Database(data_dir).list_portfolios()
+    return _get_db(data_dir).list_portfolios()
 
 
 def list_portfolios(data_dir: str) -> list[PortfolioSummary]:
     """Return one summary per saved portfolio, newest-first by creation."""
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     names = db.list_portfolios()
     return [_to_summary(db.get_portfolio(name)) for name in names]
 
@@ -64,7 +64,7 @@ def get_portfolio(data_dir: str, name: str) -> PortfolioDetail:
     Raises:
         ValueError: portfolio ``name`` does not exist in ``data_dir``.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     portfolio = db.get_portfolio(name)  # raises ValueError on unknown name
     return _detail_from_portfolio(portfolio)
 
@@ -89,7 +89,7 @@ def create_portfolio(data_dir: str, name: str) -> PortfolioDetail:
     name = (name or "").strip()
     if not name:
         raise ValueError("Portfolio name is required.")
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     if name in db.list_portfolios():
         raise ValueError(f"Portfolio '{name}' already exists.")
     db.save_portfolio(Portfolio(name=name, positions=[]))
@@ -102,7 +102,7 @@ def delete_portfolio(data_dir: str, name: str) -> None:
     Raises:
         ValueError: ``name`` does not exist in ``data_dir``.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     if name not in db.list_portfolios():
         raise ValueError(f"Portfolio '{name}' does not exist.")
     db.delete_portfolio(name)
@@ -126,7 +126,7 @@ def load_portfolio_from_csv(
     if not (csv_text or "").strip():
         raise ValueError("csv_text is empty.")
 
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".csv", delete=False, encoding="utf-8"
     ) as tmp:
@@ -152,7 +152,7 @@ def update_positions(
         ValueError: ``name`` does not exist in ``data_dir``, or an
             ``asset_type`` value is not a member of ``AssetType``.
     """
-    db = Database(data_dir)
+    db = _get_db(data_dir)
     if name not in db.list_portfolios():
         raise ValueError(f"Portfolio '{name}' does not exist.")
 

@@ -1,14 +1,23 @@
-"""HTTP routes for benchmarks (slice 5)."""
+"""HTTP routes for benchmarks (slice 5).
+
+The ``:path`` converter on ``name`` is required so benchmark slugs that
+contain a forward slash (e.g. ``60/40 Classic``) survive URL routing.
+Every benchmark route ends with a fixed suffix (``/returns``, ``/stats``,
+``/compare/{portfolio_name}``), so there's no parsing ambiguity.
+
+Service-layer ValueErrors are translated to 404/400 by the global handler
+in ``src.api.errors``.
+"""
 
 from __future__ import annotations
 
 from datetime import date
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 
 from src.api.deps import data_dir_dep
-from src.api.schemas.benchmark import (
+from src.services.schemas.benchmark import (
     BenchmarkComparison,
     BenchmarkInfo,
     BenchmarkReturnsSeries,
@@ -32,10 +41,7 @@ def get_benchmark_returns(
     start: Annotated[date | None, Query()] = None,
 ) -> BenchmarkReturnsSeries:
     """Daily + cumulative returns for one benchmark. 404 if unknown."""
-    try:
-        return benchmarks_service.benchmark_returns(data_dir, name, start=start)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return benchmarks_service.benchmark_returns(data_dir, name, start=start)
 
 
 @router.get("/{name:path}/stats", response_model=BenchmarkStats)
@@ -44,11 +50,8 @@ def get_benchmark_stats(
     data_dir: Annotated[str, Depends(data_dir_dep)],
     start: Annotated[date | None, Query()] = None,
 ) -> BenchmarkStats:
-    """Period return, annualised vol, max drawdown."""
-    try:
-        return benchmarks_service.benchmark_stats(data_dir, name, start=start)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    """Period return, annualised vol, max drawdown. 404 if unknown."""
+    return benchmarks_service.benchmark_stats(data_dir, name, start=start)
 
 
 @router.get(
@@ -65,9 +68,6 @@ def compare_to_benchmark(
 
     404 on missing benchmark or portfolio.
     """
-    try:
-        return benchmarks_service.compare_to_benchmark(
-            data_dir, portfolio_name, name, start=start,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return benchmarks_service.compare_to_benchmark(
+        data_dir, portfolio_name, name, start=start,
+    )

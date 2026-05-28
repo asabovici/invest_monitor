@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.api.schemas.portfolio import PositionInput
+from src.services.schemas.portfolio import PositionInput
 from src.services.portfolios import (
     create_portfolio,
     delete_portfolio,
