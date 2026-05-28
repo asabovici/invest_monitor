@@ -33,6 +33,15 @@ from src.services.reports import (
     income_report_to_dataframe,
     risk_metrics as service_risk_metrics,
 )
+from src.services.scenarios import (
+    run_sector_stress as service_run_sector_stress,
+    stress_result_to_dataframe,
+)
+from src.services.benchmarks import (
+    benchmark_returns as service_benchmark_returns,
+    benchmark_stats as service_benchmark_stats,
+    list_benchmarks as service_list_benchmarks,
+)
 from src.api.schemas.portfolio import PositionInput
 from src.agent import (
     CIOAgent,
@@ -1161,13 +1170,13 @@ if view == "Multi-Portfolio Dashboard":
             .transform(lambda s: (1.0 + s.fillna(0.0)).cumprod() - 1.0)
         )
 
-        # Benchmark overlay selection
-        from src.benchmarks import (
-            BENCHMARKS, benchmark_daily_returns, benchmark_stats,
-        )
+        # Benchmark overlay selection — catalogue comes from the service so the
+        # UI stays in sync with whatever the API exposes.
+        _bench_catalogue = service_list_benchmarks()
+        _bench_proxy_counts = {b.name: len(b.weights) for b in _bench_catalogue}
         selected_benchmarks = st.multiselect(
             "Overlay benchmarks",
-            options=list(BENCHMARKS.keys()),
+            options=[b.name for b in _bench_catalogue],
             default=[],
             key="attr_bench_select",
             help=(
@@ -1191,13 +1200,15 @@ if view == "Multi-Portfolio Dashboard":
             # same window start so directly comparable to the portfolio lines.
             cutoff_str = cutoff.strftime("%Y-%m-%d")
             for bname in selected_benchmarks:
-                b = BENCHMARKS[bname]
-                daily_b = benchmark_daily_returns(b, _attr_db, start_date=cutoff_str)
-                if daily_b.empty:
+                bench_series = service_benchmark_returns(
+                    _active_data_dir(), bname, start=cutoff_str,
+                )
+                if not bench_series.dates:
                     continue
-                cum_b = (1.0 + daily_b).cumprod() - 1.0
                 fig_ret.add_trace(go.Scatter(
-                    x=cum_b.index, y=cum_b.values, mode="lines",
+                    x=list(bench_series.dates),
+                    y=list(bench_series.cumulative_returns),
+                    mode="lines",
                     name=f"{bname} (benchmark)",
                     line=dict(dash="dash", width=2),
                 ))
@@ -1231,16 +1242,18 @@ if view == "Multi-Portfolio Dashboard":
         if selected_benchmarks:
             bench_rows = []
             for bname in selected_benchmarks:
-                stats_b = benchmark_stats(BENCHMARKS[bname], _attr_db, start_date=cutoff_str)
-                pr = stats_b.get("period_return")
-                vol = stats_b.get("vol_annualised")
-                mdd = stats_b.get("max_drawdown")
+                stats_b = service_benchmark_stats(
+                    _active_data_dir(), bname, start=cutoff_str,
+                )
+                pr = stats_b.period_return
+                vol = stats_b.vol_annualised
+                mdd = stats_b.max_drawdown
                 bench_rows.append({
                     "Benchmark": bname,
                     "Period Return": f"{pr:+.2%}" if pr is not None else "—",
                     "Annualised Vol": f"{vol*100:.2f}%" if vol is not None else "—",
                     "Max Drawdown (window)": f"{mdd*100:.2f}%" if mdd is not None else "—",
-                    "# Proxies": len(BENCHMARKS[bname].proxies),
+                    "# Proxies": _bench_proxy_counts.get(bname, 0),
                 })
             st.markdown("**Benchmark stats over the same window**")
             st.dataframe(pd.DataFrame(bench_rows), use_container_width=True, hide_index=True)
@@ -1248,9 +1261,9 @@ if view == "Multi-Portfolio Dashboard":
             # vs-benchmark delta: portfolio period return minus the first
             # selected benchmark's period return. Quick "did I beat it" read.
             primary_bench = selected_benchmarks[0]
-            primary_pr = benchmark_stats(
-                BENCHMARKS[primary_bench], _attr_db, start_date=cutoff_str,
-            ).get("period_return")
+            primary_pr = service_benchmark_stats(
+                _active_data_dir(), primary_bench, start=cutoff_str,
+            ).period_return
             if primary_pr is not None:
                 delta_rows = []
                 for r in end_kpi_rows:
@@ -2803,9 +2816,14 @@ with tab_risk:
                         key=f"stress_other_{scenario_name}_{at}",
                     ) / 100.0
 
-        stress_df = reporting.compute_sector_stress(
-            portfolio, sector_shocks, non_equity_shocks, latest_prices=cur_prices,
+        stress_result = service_run_sector_stress(
+            _active_data_dir(),
+            portfolio.name,
+            custom_sector_shocks=sector_shocks,
+            custom_non_equity_shocks=non_equity_shocks,
+            latest_prices=cur_prices,
         )
+        stress_df = stress_result_to_dataframe(stress_result)
 
         if not stress_df.empty:
             total_base = float(stress_df["Base Value"].sum())

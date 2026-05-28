@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from src.api.routers import portfolios, prices, reports
+from src.api.routers import benchmarks, portfolios, prices, reports, scenarios
 
 app = FastAPI(
     title="invest-monitor API",
@@ -23,6 +23,8 @@ app = FastAPI(
 app.include_router(portfolios.router)
 app.include_router(prices.router)
 app.include_router(reports.router)
+app.include_router(scenarios.router)
+app.include_router(benchmarks.router)
 
 
 @app.get("/health", tags=["meta"])
