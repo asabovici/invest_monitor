@@ -11,12 +11,14 @@ from fastapi import FastAPI
 from src.api.errors import register_error_handlers
 from src.api.middleware import DEFAULT_MAX_BODY_BYTES, BodySizeLimitMiddleware
 from src.api.routers import (
+    agents,
     benchmarks,
     groups,
     portfolios,
     prices,
     reports,
     scenarios,
+    summaries,
     trades,
 )
 
@@ -45,6 +47,8 @@ app.include_router(scenarios.router)
 app.include_router(benchmarks.router)
 app.include_router(groups.router)
 app.include_router(trades.router)
+app.include_router(agents.router)
+app.include_router(summaries.router)
 
 
 @app.get("/health", tags=["meta"])

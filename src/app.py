@@ -43,13 +43,9 @@ from src.services.benchmarks import (
     list_benchmarks as service_list_benchmarks,
 )
 from src.services.schemas.portfolio import PositionInput
-from src.agent import (
-    CIOAgent,
-    PortfolioManagerAgent,
-    ResearchAgent,
-    RiskAgent,
-    WealthAgent,
-)
+# The dashboard now talks to chat agents through ``src.services.agents`` so
+# the Anthropic client lives on the server side. Agent classes themselves
+# are still importable from ``src.agent`` for CLI and programmatic use.
 from src import demo as demo_data
 
 st.set_page_config(
@@ -1952,29 +1948,46 @@ if view == "Multi-Portfolio Dashboard":
         "in the CLI. Each tab keeps its own conversation history."
     )
 
-    def _render_agent_chat(agent_key: str, agent_cls, label: str):
-        # Scope the agent instance to the active data dir so the demo-mode
-        # toggle gives each mode its own agent + history.
-        from src import agent_summaries
+    def _render_agent_chat(agent_kind: str, label: str):
+        """Chat tab UI. Sessions live in ``services.agents``; we only store
+        the ``session_id`` in ``st.session_state``."""
+        from src.services import agents as agents_service
+        from src.services import summaries as summaries_service
+        from src.services.schemas.summary import SummaryInfo
+
         active_dir = _active_data_dir()
-        state_key = f"agent_{agent_key}_{active_dir}"
-        msgs_key  = f"agent_{agent_key}_{active_dir}_msgs"
+        session_key = f"agent_session_{agent_kind}_{active_dir}"
+        msgs_key    = f"agent_{agent_kind}_{active_dir}_msgs"
 
         if msgs_key not in st.session_state:
             st.session_state[msgs_key] = []
 
-        # ── Load past summaries as context (any agent's past convo can prime any agent) ──
-        existing_summaries = agent_summaries.list_summaries(data_dir=active_dir)
+        def _ensure_session() -> str | None:
+            """Create the service-side chat session lazily. Returns the id."""
+            if session_key not in st.session_state:
+                try:
+                    info = agents_service.start_chat(agent_kind, active_dir)
+                except Exception as exc:
+                    st.error(
+                        f"Could not start the {label} agent: {exc}. "
+                        "Make sure `ANTHROPIC_API_KEY` is set."
+                    )
+                    return None
+                st.session_state[session_key] = info.session_id
+            return st.session_state[session_key]
+
+        # ── Load past summaries as context ───────────────────────────────────
+        existing_summaries: list[SummaryInfo] = summaries_service.list_summaries(active_dir)
         if existing_summaries:
             with st.expander(
                 f"📂 Load past conversation context ({len(existing_summaries)} saved)",
                 expanded=False,
             ):
                 opt_map = {
-                    s["key"]: (
-                        f"[{s['agent']}] {s['started_at']}  ·  "
-                        f"{s['message_count']} msgs  ·  "
-                        f"{(s.get('summary') or '')[:80].strip()}…"
+                    s.key: (
+                        f"[{s.agent}] {s.started_at}  ·  "
+                        f"{s.message_count} msgs  ·  "
+                        f"{(s.summary or '')[:80].strip()}…"
                     )
                     for s in existing_summaries
                 }
@@ -1982,35 +1995,25 @@ if view == "Multi-Portfolio Dashboard":
                     "Pick conversations to prime this chat with",
                     options=list(opt_map.keys()),
                     format_func=lambda k: opt_map[k],
-                    key=f"load_ctx_{agent_key}_{active_dir}",
+                    key=f"load_ctx_{agent_kind}_{active_dir}",
                 )
                 if st.button(
                     "Load context",
-                    key=f"load_ctx_btn_{agent_key}_{active_dir}",
+                    key=f"load_ctx_btn_{agent_kind}_{active_dir}",
                     disabled=not picked_keys,
                 ):
-                    selected = [agent_summaries.get_summary(k, data_dir=active_dir)
-                                for k in picked_keys]
-                    selected = [s for s in selected if s]
-                    primer = agent_summaries.build_context_prompt(selected)
-                    # Lazy-init agent for the priming round-trip
-                    if state_key not in st.session_state:
-                        try:
-                            st.session_state[state_key] = agent_cls(data_dir=active_dir)
-                        except Exception as exc:
-                            st.error(
-                                f"Could not start the {label} agent: {exc}. "
-                                "Make sure `ANTHROPIC_API_KEY` is set."
-                            )
-                            return
+                    session_id = _ensure_session()
+                    if session_id is None:
+                        return
                     label_text = (
-                        f"_📂 Loaded context from {len(selected)} past "
-                        f"conversation(s): {', '.join(s['key'] for s in selected)}_"
+                        f"_📂 Loaded context from {len(picked_keys)} past "
+                        f"conversation(s): {', '.join(picked_keys)}_"
                     )
                     st.session_state[msgs_key].append({"role": "user", "content": label_text})
                     with st.spinner(f"Priming {label} agent with past context…"):
                         try:
-                            ack = st.session_state[state_key].chat(primer)
+                            reply = agents_service.prime_chat(session_id, list(picked_keys))
+                            ack = reply.reply
                         except Exception as exc:
                             ack = f"⚠️ Agent error while loading context: {exc}"
                     st.session_state[msgs_key].append({"role": "assistant", "content": ack})
@@ -2021,57 +2024,44 @@ if view == "Multi-Portfolio Dashboard":
                 st.markdown(msg["content"])
 
         prompt = st.chat_input(
-            f"Ask the {label} agent…", key=f"input_{agent_key}",
+            f"Ask the {label} agent…", key=f"input_{agent_kind}",
         )
 
-        # Action buttons row: Clear + Save summary
         col_clear, col_save = st.columns(2)
         with col_clear:
-            if st.button("Clear conversation", key=f"clear_{agent_key}"):
-                st.session_state.pop(state_key, None)
+            if st.button("Clear conversation", key=f"clear_{agent_kind}"):
+                # Drop the cached session so the next message gets a fresh one.
+                old_sid = st.session_state.pop(session_key, None)
+                if old_sid:
+                    try:
+                        agents_service.end_chat(old_sid)
+                    except ValueError:
+                        pass
                 st.session_state[msgs_key] = []
                 st.rerun()
         with col_save:
-            can_save = bool(st.session_state[msgs_key])
+            can_save = bool(st.session_state[msgs_key]) and session_key in st.session_state
             if st.button(
-                "💾 Save summary", key=f"save_summary_{agent_key}_{active_dir}",
+                "💾 Save summary", key=f"save_summary_{agent_kind}_{active_dir}",
                 disabled=not can_save,
                 help="Compress this conversation via Claude Haiku and store it "
                      "in agent_summaries.json so you can reload it later.",
             ):
                 try:
                     with st.spinner("Summarising conversation…"):
-                        # Use the agent's Anthropic client when available to
-                        # avoid double-instantiating Anthropic().
-                        client = (
-                            st.session_state[state_key].client
-                            if state_key in st.session_state else None
+                        detail = summaries_service.save_summary_from_session(
+                            active_dir, st.session_state[session_key],
                         )
-                        key, entry = agent_summaries.save_summary(
-                            agent=agent_key,
-                            messages=st.session_state[msgs_key],
-                            client=client,
-                            data_dir=active_dir,
-                        )
-                    st.success(f"Saved as `{key}`")
+                    st.success(f"Saved as `{detail.key}`")
                     with st.expander("Summary preview", expanded=True):
-                        st.markdown(entry["summary"])
+                        st.markdown(detail.summary)
                 except Exception as exc:
                     st.error(f"Could not save summary: {exc}")
 
         if prompt:
-            # Lazy-init the agent only when the user actually sends a message,
-            # so a missing ANTHROPIC_API_KEY doesn't break the whole dashboard.
-            if state_key not in st.session_state:
-                try:
-                    st.session_state[state_key] = agent_cls(data_dir=active_dir)
-                except Exception as exc:
-                    with st.chat_message("assistant"):
-                        st.error(
-                            f"Could not start the {label} agent: {exc}.\n\n"
-                            "Make sure `ANTHROPIC_API_KEY` is set in your environment."
-                        )
-                    return
+            session_id = _ensure_session()
+            if session_id is None:
+                return
 
             st.session_state[msgs_key].append({"role": "user", "content": prompt})
             with st.chat_message("user"):
@@ -2080,7 +2070,8 @@ if view == "Multi-Portfolio Dashboard":
             with st.chat_message("assistant"):
                 with st.spinner(f"{label} agent thinking…"):
                     try:
-                        reply = st.session_state[state_key].chat(prompt)
+                        reply_obj = agents_service.chat_message(session_id, prompt)
+                        reply = reply_obj.reply
                     except Exception as exc:
                         reply = f"⚠️ Agent error: {exc}"
                 st.markdown(reply)
@@ -2097,15 +2088,15 @@ if view == "Multi-Portfolio Dashboard":
         "⚠️ Risk", "💰 Wealth", "🔬 Research", "💼 PM", "🎩 CIO",
     ])
     with tab_risk_chat:
-        _render_agent_chat("risk", RiskAgent, "Risk")
+        _render_agent_chat("risk", "Risk")
     with tab_wealth_chat:
-        _render_agent_chat("wealth", WealthAgent, "Wealth")
+        _render_agent_chat("wealth", "Wealth")
     with tab_research_chat:
-        _render_agent_chat("research", ResearchAgent, "Research")
+        _render_agent_chat("research", "Research")
     with tab_pm_chat:
-        _render_agent_chat("pm", PortfolioManagerAgent, "PM")
+        _render_agent_chat("pm", "PM")
     with tab_cio_chat:
-        _render_agent_chat("cio", CIOAgent, "CIO")
+        _render_agent_chat("cio", "CIO")
 
     st.stop()
 

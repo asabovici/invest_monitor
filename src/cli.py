@@ -134,49 +134,54 @@ def summaries():
 
 @summaries.command("list")
 @click.option("--agent", default=None,
-              help="Filter to one agent (risk / wealth / research).")
-def summaries_list(agent):
+              help="Filter to one agent (risk / wealth / research / pm / cio).")
+@click.option("--data-dir", default="data", show_default=True)
+def summaries_list(agent, data_dir):
     """Show all saved agent-conversation summaries, newest first."""
-    from src import agent_summaries
-    items = agent_summaries.list_summaries(agent=agent)
+    from src.services.summaries import list_summaries
+    items = list_summaries(data_dir, agent=agent)
     if not items:
         click.echo("No summaries stored." + (f" (filter: agent={agent})" if agent else ""))
         return
     rows = [{
-        "key":       s["key"],
-        "agent":     s["agent"],
-        "started":   s["started_at"],
-        "msgs":      s["message_count"],
-        "preview":   (s.get("summary") or "")[:60].replace("\n", " ") + "…",
+        "key":     s.key,
+        "agent":   s.agent,
+        "started": s.started_at,
+        "msgs":    s.message_count,
+        "preview": (s.summary or "")[:60].replace("\n", " ") + "…",
     } for s in items]
     click.echo(tabulate(rows, headers="keys", tablefmt="github"))
 
 
 @summaries.command("show")
 @click.argument("key")
-def summaries_show(key):
+@click.option("--data-dir", default="data", show_default=True)
+def summaries_show(key, data_dir):
     """Print one summary in full."""
-    from src import agent_summaries
-    s = agent_summaries.get_summary(key)
-    if s is None:
-        raise click.ClickException(f"No summary with key '{key}'.")
-    click.echo(f"agent      : {s['agent']}")
-    click.echo(f"started_at : {s['started_at']}")
-    click.echo(f"messages   : {s['message_count']}")
+    from src.services.summaries import get_summary
+    try:
+        s = get_summary(data_dir, key)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"agent      : {s.agent}")
+    click.echo(f"started_at : {s.started_at}")
+    click.echo(f"messages   : {s.message_count}")
     click.echo()
     click.echo("=== SUMMARY ===")
-    click.echo(s.get("summary") or "(empty)")
+    click.echo(s.summary or "(empty)")
 
 
 @summaries.command("delete")
 @click.argument("key")
-def summaries_delete(key):
+@click.option("--data-dir", default="data", show_default=True)
+def summaries_delete(key, data_dir):
     """Delete a stored summary."""
-    from src import agent_summaries
-    if agent_summaries.delete_summary(key):
-        click.echo(f"Deleted '{key}'.")
-    else:
-        raise click.ClickException(f"No summary with key '{key}'.")
+    from src.services.summaries import delete_summary
+    try:
+        delete_summary(data_dir, key)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Deleted '{key}'.")
 
 
 @cli.group()
