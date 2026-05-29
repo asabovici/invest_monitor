@@ -320,55 +320,52 @@ def production():
 
 
 @production.command("status")
-def production_status():
+@click.option("--data-dir", default="data", show_default=True)
+def production_status(data_dir):
     """Show each job's last run, status, and whether it's due."""
-    import pandas as pd
-    from src.production import JobRunner
-    runner = JobRunner(Database())
-    jobs = runner.db.get_production_jobs().sort_values("job_name")
-    now = pd.Timestamp.now()
+    from src.services.production import list_jobs
     rows = []
-    for _, r in jobs.iterrows():
-        last_run = r["last_run_at"]
+    for j in list_jobs(data_dir):
         rows.append({
-            "job":         r["job_name"],
-            "enabled":     "yes" if bool(r["enabled"]) else "no",
-            "interval_h":  round(int(r["interval_minutes"]) / 60, 1),
-            "last_run":    last_run.strftime("%Y-%m-%d %H:%M") if pd.notna(last_run) else "—",
-            "last_status": r["last_status"] or "—",
-            "due":         "yes" if runner.is_due(r, now=now) else "no",
+            "job":         j.job_name,
+            "enabled":     "yes" if j.enabled else "no",
+            "interval_h":  round(j.interval_minutes / 60, 1),
+            "last_run":    j.last_run_at.strftime("%Y-%m-%d %H:%M") if j.last_run_at else "—",
+            "last_status": j.last_status or "—",
+            "due":         "yes" if j.is_due else "no",
         })
     click.echo(tabulate(rows, headers="keys", tablefmt="github"))
 
 
 @production.command("run")
-def production_run():
+@click.option("--data-dir", default="data", show_default=True)
+def production_run(data_dir):
     """Run every job that's currently due. Cron-friendly one-shot."""
-    from src.production import JobRunner
-    runner = JobRunner(Database())
-    results = runner.run_due_jobs()
-    if not results:
+    from src.services.production import run_due_jobs
+    resp = run_due_jobs(data_dir)
+    if not resp.results:
         click.echo("No jobs were due.")
         return
-    for r in results:
-        click.echo(f"[{r['status']:7}] {r['job_name']:24}  {r.get('duration_seconds', 0):.2f}s"
-                   + (f"  — {r.get('error')}" if r['status'] == 'error' else ""))
+    for r in resp.results:
+        click.echo(
+            f"[{r.status:7}] {r.job_name:24}  {r.duration_seconds:.2f}s"
+            + (f"  — {r.error}" if r.status == "error" else "")
+        )
 
 
 @production.command("run-now")
 @click.argument("job_name")
-def production_run_now(job_name):
+@click.option("--data-dir", default="data", show_default=True)
+def production_run_now(job_name, data_dir):
     """Force-run one job ignoring schedule + enabled flag."""
-    from src.production import JobRunner, JOB_REGISTRY
-    if job_name not in JOB_REGISTRY:
-        raise click.ClickException(
-            f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
-        )
-    runner = JobRunner(Database())
-    r = runner.run_job(job_name, force=True)
+    from src.services.production import run_job
+    try:
+        r = run_job(data_dir, job_name, force=True)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(
-        f"[{r['status']}] {job_name}  {r.get('duration_seconds', 0):.2f}s"
-        + (f"\n{r.get('error')}" if r['status'] == 'error' else "")
+        f"[{r.status}] {job_name}  {r.duration_seconds:.2f}s"
+        + (f"\n{r.error}" if r.status == "error" else "")
     )
 
 
@@ -449,18 +446,20 @@ def schedule_uninstall(job_name):
 @click.option("--from", "start_date", default=None,
               help="Recompute from this date onward (YYYY-MM-DD).")
 @click.option("--full", is_flag=True, help="Recompute the full history (ignore incremental).")
-def metrics_refresh(portfolio_name, start_date, full):
+@click.option("--data-dir", default="data", show_default=True)
+def metrics_refresh(portfolio_name, start_date, full, data_dir):
     """Compute daily security / portfolio / attribution metrics and save to parquet."""
-    from src.attribution import AttributionEngine
-    db = Database()
-    summary = AttributionEngine(db).refresh_all(
-        start_date=start_date, portfolio_name=portfolio_name, full=full,
-    )
+    from src.services.production import refresh_metrics
+    from src.services.schemas.production import MetricsRefreshRequest
+    summary = refresh_metrics(
+        data_dir,
+        MetricsRefreshRequest(portfolio_name=portfolio_name, start_date=start_date, full=full),
+    ).summary
     click.echo(
-        f"Refreshed metrics — security: {summary['security_rows']} rows, "
-        f"portfolio: {summary['portfolio_rows']} rows, "
-        f"attribution: {summary['attribution_rows']} rows "
-        f"(portfolios: {', '.join(summary['portfolios'])})"
+        f"Refreshed metrics — security: {summary.get('security_rows', 0)} rows, "
+        f"portfolio: {summary.get('portfolio_rows', 0)} rows, "
+        f"attribution: {summary.get('attribution_rows', 0)} rows "
+        f"(portfolios: {', '.join(summary.get('portfolios') or [])})"
     )
 
 

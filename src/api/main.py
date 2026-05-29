@@ -16,6 +16,7 @@ from src.api.routers import (
     groups,
     portfolios,
     prices,
+    production,
     reports,
     scenarios,
     summaries,
@@ -51,6 +52,7 @@ app.include_router(trades.router)
 app.include_router(agents.router)
 app.include_router(summaries.router)
 app.include_router(trading_graph.router)
+app.include_router(production.router)
 
 
 @app.get("/health", tags=["meta"])

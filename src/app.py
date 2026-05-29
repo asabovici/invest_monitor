@@ -2103,7 +2103,13 @@ if view == "Multi-Portfolio Dashboard":
 # ── Production view ───────────────────────────────────────────────────────────
 
 if view == "⚙️ Production":
-    from src.production import JobRunner, JOB_REGISTRY
+    from src.services.production import (
+        list_jobs as service_list_jobs,
+        list_runs as service_list_runs,
+        run_due_jobs as service_run_due_jobs,
+        run_job as service_run_job,
+        set_job_enabled as service_set_job_enabled,
+    )
     st.title("⚙️ Analytics Production")
     st.caption(
         "Scheduled jobs that keep the analytics fresh: price collection, "
@@ -2112,17 +2118,25 @@ if view == "⚙️ Production":
         "into cron / systemd for true automation."
     )
 
-    _prod_db = get_db()
-    _runner = JobRunner(_prod_db)
-    jobs_df = _prod_db.get_production_jobs()
-    now = pd.Timestamp.now()
-    if not jobs_df.empty:
-        jobs_df = jobs_df.sort_values("job_name").reset_index(drop=True)
+    _job_statuses = service_list_jobs(_active_data_dir())
+    # Rebuild a DataFrame for the existing chart/table layout — service is the
+    # source of truth, pandas just convenient for the downstream rendering.
+    jobs_df = pd.DataFrame([{
+        "job_name":              j.job_name,
+        "enabled":               j.enabled,
+        "interval_minutes":      j.interval_minutes,
+        "last_run_at":           j.last_run_at,
+        "last_status":           j.last_status,
+        "last_error":            j.last_error,
+        "last_duration_seconds": j.last_duration_seconds,
+        "is_due":                j.is_due,
+        "description":           j.description,
+    } for j in _job_statuses])
 
     # ── KPI strip ─────────────────────────────────────────────────────────────
     n_jobs   = len(jobs_df)
     n_failed = int((jobs_df["last_status"] == "error").sum()) if n_jobs else 0
-    n_due    = sum(_runner.is_due(r, now=now) for _, r in jobs_df.iterrows()) if n_jobs else 0
+    n_due    = int(jobs_df["is_due"].sum()) if n_jobs else 0
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Jobs",            n_jobs)
@@ -2139,15 +2153,14 @@ if view == "⚙️ Production":
     with col_a:
         if st.button("Run all due now", type="primary", key="prod_run_due_btn"):
             with st.spinner("Running due jobs…"):
-                results = _runner.run_due_jobs()
-            if not results:
+                resp = service_run_due_jobs(_active_data_dir())
+            if not resp.results:
                 st.info("No jobs were due.")
             else:
-                for r in results:
-                    icon = "✅" if r["status"] == "success" else "❌" if r["status"] == "error" else "⏭️"
-                    st.write(f"{icon} **{r['job_name']}** — {r['status']} "
-                             f"({r.get('duration_seconds', 0):.1f}s)"
-                             + (f"  \n`{r.get('error', '')}`" if r['status'] == 'error' else ""))
+                for r in resp.results:
+                    icon = "✅" if r.status == "success" else "❌" if r.status == "error" else "⏭️"
+                    st.write(f"{icon} **{r.job_name}** — {r.status} ({r.duration_seconds:.1f}s)"
+                             + (f"  \n`{r.error}`" if r.status == "error" else ""))
             st.rerun()
     with col_b:
         st.caption(
@@ -2162,7 +2175,7 @@ if view == "⚙️ Production":
     else:
         for _, r in jobs_df.iterrows():
             jname = r["job_name"]
-            desc  = JOB_REGISTRY.get(jname, {}).get("description", "")
+            desc  = r.get("description") or ""
             interval_h = round(int(r["interval_minutes"]) / 60, 1) if r["interval_minutes"] else 0
             last_run = r["last_run_at"]
             last_run_str = last_run.strftime("%Y-%m-%d %H:%M") if pd.notna(last_run) else "—"
@@ -2170,7 +2183,7 @@ if view == "⚙️ Production":
                 "success":   "✅", "error":     "❌",
                 "never_run": "⏸️",  "running":   "⏳",
             }.get(r["last_status"], "❔")
-            due_icon = "🔔" if _runner.is_due(r, now=now) else "  "
+            due_icon = "🔔" if bool(r["is_due"]) else "  "
 
             with st.container(border=True):
                 row_cols = st.columns([3, 2, 2, 2, 1, 1])
@@ -2193,17 +2206,26 @@ if view == "⚙️ Production":
                         label_visibility="collapsed",
                     )
                     if enabled != bool(r["enabled"]):
-                        _prod_db.upsert_production_job(jname, enabled=enabled)
-                        st.rerun()
+                        try:
+                            service_set_job_enabled(_active_data_dir(), jname, enabled)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
                 with row_cols[5]:
                     if st.button("Run", key=f"prod_run_{jname}"):
                         with st.spinner(f"Running {jname}…"):
-                            result = _runner.run_job(jname, force=True)
-                        if result["status"] == "success":
-                            st.toast(f"✅ {jname} succeeded ({result.get('duration_seconds', 0):.1f}s)")
-                        elif result["status"] == "error":
-                            st.toast(f"❌ {jname} failed: {result.get('error')}", icon="🚨")
-                        st.rerun()
+                            try:
+                                result = service_run_job(_active_data_dir(), jname, force=True)
+                            except ValueError as exc:
+                                st.error(str(exc))
+                                result = None
+                        if result is not None:
+                            if result.status == "success":
+                                st.toast(f"✅ {jname} succeeded ({result.duration_seconds:.1f}s)")
+                            elif result.status == "error":
+                                st.toast(f"❌ {jname} failed: {result.error}", icon="🚨")
+                            st.rerun()
                 if r["last_status"] == "error" and r["last_error"]:
                     st.error(f"`{r['last_error']}`")
 
@@ -2270,7 +2292,16 @@ if view == "⚙️ Production":
     # ── Run log + Issues tabs ─────────────────────────────────────────────────
     st.markdown("---")
     tab_recent, tab_issues = st.tabs(["📜 Recent Runs", "🚨 Issues"])
-    runs_df = _prod_db.get_production_runs(limit=200)
+    _run_records = service_list_runs(_active_data_dir(), limit=200)
+    runs_df = pd.DataFrame([{
+        "job_name":         r.job_name,
+        "started_at":       r.started_at,
+        "ended_at":         r.ended_at,
+        "status":           r.status,
+        "duration_seconds": r.duration_seconds,
+        "error_message":    r.error_message,
+        "details":          r.details,
+    } for r in _run_records])
 
     def _fmt_runs(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
