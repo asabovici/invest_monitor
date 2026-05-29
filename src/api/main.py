@@ -20,6 +20,7 @@ from src.api.routers import (
     scenarios,
     summaries,
     trades,
+    trading_graph,
 )
 
 app = FastAPI(
@@ -49,6 +50,7 @@ app.include_router(groups.router)
 app.include_router(trades.router)
 app.include_router(agents.router)
 app.include_router(summaries.router)
+app.include_router(trading_graph.router)
 
 
 @app.get("/health", tags=["meta"])
