@@ -13,15 +13,41 @@ src/api/
 ├── errors.py            # Global ValueError → HTTP exception handler
 ├── middleware.py        # Body-size-limit ASGI middleware
 ├── routers/             # One file per resource
+│   ├── agents.py
+│   ├── benchmarks.py
+│   ├── groups.py
 │   ├── portfolios.py
 │   ├── prices.py
+│   ├── production.py
 │   ├── reports.py
 │   ├── scenarios.py
-│   └── benchmarks.py
+│   ├── summaries.py
+│   ├── trades.py
+│   └── trading_graph.py
 └── schemas/             # Back-compat re-export shim → src/services/schemas/
 ```
 
 Boot with `uvicorn src.api.main:app` or `invest-monitor serve`.
+
+## Endpoint surface
+
+Hit `GET /openapi.json` (or `/docs` for Swagger) on a running server for
+the authoritative list. High-level groupings:
+
+| Prefix | What it covers |
+|---|---|
+| `/portfolios` | List / detail, create / delete / load-csv / update-positions, plus convenience `{name}/groups` and `{name}/trades` reads |
+| `/prices` | `/latest`, `/history`, `/collect` (long-running) |
+| `/reports/{kind}/{portfolio}` | `risk`, `exposure`, `income`, `correlation`, `attribution` |
+| `/scenarios` | `/stress`, `/mc`, `/regimes` listings; `POST /stress/{portfolio}` runs |
+| `/benchmarks` | List + `/{name:path}/{returns,stats}` + `/compare/{portfolio}` |
+| `/groups` | CRUD + atomic `/members` replace; per-member add/remove |
+| `/trades` | List (with `?portfolio_name=` filter), record |
+| `/agents` | `/kinds`, `/{kind}/sessions`, message / prime / history / end |
+| `/summaries` | List, get, delete, `POST /from-session` |
+| `/trading-graph/runs` | Start / get / resume / end (HITL pause is a real REST step) |
+| `/production` | `/jobs`, `/jobs/{name}/run`, `/run-due`, `/runs`, `/metrics-refresh` |
+| `/health` | Liveness probe |
 
 ## Conventions
 
@@ -51,7 +77,8 @@ Depends(data_dir_dep)]`. The dependency resolves the data dir from:
 3. `"data"` fallback.
 
 Mirrors the Streamlit sidebar's live/demo toggle. No URL changes needed
-to switch datasets.
+to switch datasets. Routes that don't touch storage (e.g. `/health`,
+`/agents/kinds`) omit the dep.
 
 ### Schemas
 
@@ -78,10 +105,25 @@ under a megabyte. Bump the cap by passing `max_bytes=...` when mounting.
 
 ### Long-running endpoints
 
-`POST /prices/collect` is **synchronous**. It runs a yfinance download
-per ticker; large portfolios can hold a worker for minutes. The top-level
-app description and the route docstring both flag this. A streaming /
-background-job version is planned with the production-jobs slice.
+Several endpoints are **synchronous** and can hold a worker for minutes:
+
+- `POST /prices/collect` (yfinance per ticker)
+- `POST /production/jobs/{name}/run` (especially `collect_prices` /
+  `refresh_attribution`)
+- `POST /production/run-due`
+- `POST /production/metrics-refresh`
+
+The top-level app description and the route docstrings both flag this.
+For production workloads use `invest-monitor production run` from cron /
+systemd rather than the HTTP endpoint. A streaming / background-job
+version is planned in a later slice.
+
+### Process-local sessions
+
+`/agents/sessions/{id}` and `/trading-graph/runs/{id}` are keyed on
+UUIDs held in process-local dicts in the service layer. Sessions / runs
+do **not** survive a uvicorn restart. Clients should treat the ids as
+short-lived; persistent context belongs in `/summaries`.
 
 ## Adding a new resource
 
@@ -90,7 +132,7 @@ background-job version is planned with the production-jobs slice.
 3. Add `src/api/routers/<resource>.py`:
    - `router = APIRouter(prefix="/<resource>", tags=["<resource>"])`
    - Thin functions: no try/except, just call the service.
-   - Take `data_dir: Annotated[str, Depends(data_dir_dep)]`.
+   - Take `data_dir: Annotated[str, Depends(data_dir_dep)]` when storage is involved.
 4. Mount in `src/api/main.py`: `app.include_router(<resource>.router)`.
 5. Tests at `tests/api/test_<resource>.py` using `fastapi.testclient.TestClient`.
    See `tests/api/test_portfolios.py` for the shape.
@@ -101,3 +143,7 @@ background-job version is planned with the production-jobs slice.
 `src.attribution`, etc. directly.** Always go through `src/services/`.
 If you find yourself reaching past the service layer from a router,
 that's a missing service function.
+
+The same rule applies to `src/app.py` and `src/cli.py`, enforced by
+`tests/test_lint_domain_layering.py` — a ratchet that fails on any new
+direct domain-class reference in those files.

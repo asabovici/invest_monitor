@@ -82,6 +82,10 @@ choices flow from here. **Never hardcode them inside a node.**
 
 ## Running a graph
 
+Three ways, in increasing order of indirection:
+
+**1. Direct (testing / smoke).**
+
 ```python
 from src.trading_graph import Settings, build_graph, initial_state
 
@@ -94,6 +98,32 @@ assert final["final_execution_ready"]
 With HITL the first `invoke` pauses before `cio`; resume by invoking
 with `None` on the same `thread_id`. The `MemorySaver` keeps state
 between the two calls.
+
+**2. Through the service** — `src/services/trading_graph.py`.
+
+```python
+from src.services.trading_graph import start_run, resume_run
+from src.services.schemas.trading_graph import TradingGraphSettings
+
+state = start_run(TradingGraphSettings(human_in_the_loop=True))
+# ... inspect state.proposed_trades, get a human sign-off ...
+final = resume_run(state.run_id)
+```
+
+The service holds a two-layer cache: `_get_compiled_graph(settings)`
+keyed on the frozen `Settings` (so identical-settings runs share a
+checkpointer), plus a `_runs` dict mapping `run_id` → `(thread_id,
+settings)`. Runs survive across multiple HTTP requests but **not**
+across uvicorn restarts.
+
+**3. Over HTTP** — `/trading-graph/runs`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/trading-graph/runs` | Start. Returns snapshot at first interrupt / completion. |
+| `GET` | `/trading-graph/runs/{id}` | Current snapshot. |
+| `POST` | `/trading-graph/runs/{id}/resume` | Continue. Optional `state_patch` for CIO overrides. |
+| `DELETE` | `/trading-graph/runs/{id}` | Drop the run record. |
 
 ## Stubs vs real prompts
 
@@ -109,11 +139,13 @@ land.
 
 ## Tests
 
-`tests/test_trading_graph_state.py` (reducer semantics),
-`tests/test_trading_graph_routing.py` (every branch, including loop
-guard), and `tests/test_trading_graph_smoke.py` (end-to-end termination
-and HITL pause-then-resume). All 15 tests run without an
-`ANTHROPIC_API_KEY`.
+- `tests/test_trading_graph_state.py` — reducer semantics
+- `tests/test_trading_graph_routing.py` — every branch including loop guard
+- `tests/test_trading_graph_smoke.py` — end-to-end termination + HITL pause/resume
+- `tests/services/test_trading_graph.py` — service-layer (start / get / resume / end + cache)
+- `tests/api/test_trading_graph.py` — TestClient covering the four routes
+
+All run without an `ANTHROPIC_API_KEY` since the nodes are still stubs.
 
 ## Common pitfalls
 

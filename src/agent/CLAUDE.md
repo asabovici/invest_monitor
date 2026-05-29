@@ -16,8 +16,21 @@ those graph nodes.
 | `portfolio_manager_agent.py` | `PortfolioManagerAgent` | `invest-monitor pm` | Build defensible trade proposals |
 | `cio_agent.py` | `CIOAgent` | `invest-monitor cio` | Approve / override / kick back proposals |
 
-All five are exported from `src/agent/__init__.py` and instantiated lazily
-by the Streamlit dashboard (`🤖 Ask the Agents` section) and the CLI.
+All five are exported from `src/agent/__init__.py`.
+
+- **CLI** (`invest-monitor agent`, `wealth`, `research`, `pm`, `cio`)
+  instantiates the agent class directly and drives a `run_interactive()`
+  REPL. Stays direct because the input()-loop doesn't benefit from HTTP
+  indirection.
+- **Streamlit dashboard** and **future frontends** go through
+  `src/services/agents.py`, which holds a process-local
+  `{session_id: _AgentSession}` cache. Agents are instantiated lazily on
+  the first message so a missing `ANTHROPIC_API_KEY` only breaks the
+  first exchange, not session creation.
+- **HTTP**: `/agents/{kind}/sessions`, `/agents/sessions/{id}/messages`,
+  `/agents/sessions/{id}/prime`, `/agents/sessions/{id}/history`.
+  Sessions don't survive uvicorn restarts — use `/summaries` for
+  persistent context.
 
 ## The pattern
 
@@ -67,7 +80,9 @@ overwrite=False)` skill — Wealth / PM / CIO all get it via
 - **Conversation summaries** (`src/agent_summaries.py`) compress chats via
   Haiku and persist to `<data_dir>/agent_summaries.json`. Keyed on agent
   name (`risk`, `wealth`, `research`, `pm`, `cio`) — adding a new agent
-  just adds another key, no migration needed.
+  just adds another key, no migration needed. The service wrapper at
+  `src/services/summaries.py` is what clients should call; it reuses the
+  session's own Anthropic client to avoid a second instantiation.
 - **Web search** is server-side only (`{"type": "web_search_20260209"}`),
   resolved by Anthropic before the response reaches the tool runner.
   Composes cleanly with `@beta_tool` skills.
@@ -78,9 +93,13 @@ overwrite=False)` skill — Wealth / PM / CIO all get it via
 2. `x_skills.py` with `create_x_skills(db, engine)` factory.
 3. Append the shared `export_report` skill if it makes sense for this agent.
 4. Export from `__init__.py`.
-5. Wire CLI in `src/cli.py` (copy an existing `agent`/`wealth`/`cio` command).
-6. Add a dashboard tab in `src/app.py` (`_render_agent_chat("x", XAgent, "X")`).
-7. Document in `AGENTS.md` and `docs/ai-agents.md`.
+5. Register with the chat-session service:
+   `src/services/agents.py:_AGENT_CLASSES["x"] = XAgent`.
+6. Wire CLI in `src/cli.py` (copy an existing `agent`/`wealth`/`cio` command).
+7. Add a dashboard tab in `src/app.py` (`_render_agent_chat("x", "X")`).
+8. Update `AgentKind` Literal in `src/services/schemas/agent.py` if you
+   want HTTP clients to be able to start sessions for it.
+9. Document in `AGENTS.md` and `docs/ai-agents.md`.
 
 ## Future: bridging to the LangGraph
 
