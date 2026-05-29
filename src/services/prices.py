@@ -95,27 +95,35 @@ def collect_prices(
     data_dir: str,
     period: str = "1y",
     portfolio_name: str | None = None,
+    tickers: list[str] | None = None,
 ) -> CollectionResult:
     """Fetch prices via yfinance and save to the database.
 
-    Without ``portfolio_name``: collect every asset in the assets table.
-    With ``portfolio_name``: collect only that portfolio's tickers.
+    Source-of-tickers resolution order (first match wins):
+
+    1. Explicit ``tickers`` list — used by admin flows like
+       ``invest-monitor benchmarks fetch`` that need to pull a fixed list
+       (the benchmark proxy ETFs) without involving a saved portfolio.
+    2. ``portfolio_name`` — that portfolio's tickers only.
+    3. Otherwise — every asset in the assets table.
 
     Failures (yfinance error, empty response) land in ``tickers_failed``
     rather than raising — bulk collection should not abort on one bad
     ticker.
     """
     db = _get_db(data_dir)
-    if portfolio_name:
+    if tickers is not None:
+        resolved = [t for t in tickers if t]
+    elif portfolio_name:
         portfolio = db.get_portfolio(portfolio_name)  # raises ValueError if missing
-        tickers = [pos.asset.ticker for pos in portfolio.positions]
+        resolved = [pos.asset.ticker for pos in portfolio.positions]
     else:
-        tickers = db.get_all_tickers()
+        resolved = db.get_all_tickers()
 
-    if not tickers:
+    if not resolved:
         return CollectionResult(tickers_collected=[], tickers_failed={})
 
-    return _collect_for_tickers(db, tickers, period)
+    return _collect_for_tickers(db, resolved, period)
 
 
 def _collect_for_tickers(db: Database, tickers: list[str], period: str) -> CollectionResult:

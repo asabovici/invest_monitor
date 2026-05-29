@@ -2,10 +2,10 @@ import click
 from tabulate import tabulate
 
 from src import env as _env  # noqa: F401  — loads .env into os.environ
+# Database is still imported because the `production daemon` command
+# instantiates one for the long-running loop. Every other CLI command goes
+# through src.services.*.
 from src.database import Database
-from src.collector import Collector
-from src.data.ingestion import Ingester
-from src.reporting import ReportingEngine
 from src.agent import (
     CIOAgent,
     PortfolioManagerAgent,
@@ -296,15 +296,20 @@ def benchmarks_list():
 @benchmarks.command("fetch")
 @click.option("--period", default="10y",
               help="yfinance period to pull for each proxy (default 10y).")
-def benchmarks_fetch(period):
+@click.option("--data-dir", default="data", show_default=True)
+def benchmarks_fetch(period, data_dir):
     """Pull price history for every benchmark proxy via yfinance."""
     from src.benchmarks import all_proxy_tickers
-    from src.collector import Collector
-    db = Database()
+    from src.services.prices import collect_prices
     tickers = all_proxy_tickers()
     click.echo(f"Fetching prices for {len(tickers)} proxy tickers: {', '.join(tickers)}")
-    Collector(db).collect_prices(tickers, period=period)
-    click.echo("Done.")
+    result = collect_prices(data_dir, period=period, tickers=tickers)
+    click.echo(
+        f"Done. Collected {len(result.tickers_collected)}, "
+        f"failed {len(result.tickers_failed)}."
+    )
+    for t, reason in result.tickers_failed.items():
+        click.echo(f"  ! {t}: {reason}")
 
 
 @cli.group()
@@ -418,11 +423,11 @@ def schedule_install(job_name, interval):
             f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
         )
     if interval is None:
-        db = Database()
-        jobs = db.get_production_jobs()
-        match = jobs[jobs["job_name"] == job_name] if not jobs.empty else None
-        interval = int(match["interval_minutes"].iloc[0]) if match is not None and not match.empty \
-                   else int(JOB_REGISTRY[job_name]["interval_minutes"])
+        from src.services.production import get_job
+        try:
+            interval = int(get_job("data", job_name).interval_minutes)
+        except ValueError:
+            interval = int(JOB_REGISTRY[job_name]["interval_minutes"])
     res = _sched.install(job_name, interval)
     if not res["ok"]:
         raise click.ClickException(res["detail"])
@@ -465,24 +470,37 @@ def metrics_refresh(portfolio_name, start_date, full, data_dir):
 
 @cli.command()
 @click.argument("name")
-def report(name):
+@click.option("--data-dir", default="data", show_default=True)
+def report(name, data_dir):
     """Generate risk and exposure reports for a saved portfolio."""
-    db = Database()
-    portfolio = db.get_portfolio(name)
-    engine = ReportingEngine(db)
+    from src.services.reports import (
+        covariance_to_dataframe,
+        exposure as service_exposure,
+        risk_metrics as service_risk_metrics,
+    )
 
-    click.echo(f"\n--- {portfolio.name} — Exposure Report ---")
-    exposure = engine.get_portfolio_exposure(portfolio)
-    click.echo(tabulate(exposure, headers="keys", tablefmt="grid"))
+    try:
+        exposure_report = service_exposure(data_dir, name)
+        risk_report = service_risk_metrics(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
-    click.echo(f"\n--- {portfolio.name} — Risk Metrics ---")
-    metrics = engine.get_portfolio_risk_metrics(portfolio)
-    for k, v in metrics.items():
-        if k == "Covariance Matrix":
-            click.echo(f"\n{k}:")
-            click.echo(tabulate(v, headers="keys", tablefmt="grid"))
-        else:
-            click.echo(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
+    click.echo(f"\n--- {exposure_report.portfolio_name} — Exposure Report ---")
+    exposure_rows = [
+        {"asset_type": r.asset_type, "sector": r.sector or "—",
+         "market_value": round(r.market_value, 2), "weight_pct": round(r.weight_pct, 2)}
+        for r in exposure_report.rows
+    ]
+    click.echo(tabulate(exposure_rows, headers="keys", tablefmt="grid"))
+
+    click.echo(f"\n--- {risk_report.portfolio_name} — Risk Metrics ---")
+    click.echo(f"Volatility: {risk_report.annualised_volatility:.4f}")
+    click.echo(f"Historical VaR (95%): {risk_report.historical_var_95:.4f}")
+    click.echo(f"Monte Carlo VaR (95%): {risk_report.monte_carlo_var_95:.4f}")
+    cov_df = covariance_to_dataframe(risk_report)
+    if not cov_df.empty:
+        click.echo("\nCovariance Matrix:")
+        click.echo(tabulate(cov_df, headers="keys", tablefmt="grid"))
 
 
 @cli.command()

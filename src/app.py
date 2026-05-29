@@ -63,6 +63,24 @@ def _active_data_dir() -> str:
     return demo_data.DEMO_DATA_DIR if st.session_state.get("demo_mode") else LIVE_DATA_DIR
 
 
+# ── Domain-layer escape hatches ─────────────────────────────────────────────
+#
+# Streamlit code goes through ``src.services`` for everything that has a
+# service today. The two accessors below are the last documented escape
+# hatches for paths that haven't been migrated yet:
+#
+#   * ``db.get_portfolio(name)`` — domain Portfolio used by lookthrough,
+#     metrics, agent inputs. Migrating means rewriting consumers that
+#     expect the rich domain object.
+#   * ``db.get_sector_betas`` / ``list_sector_beta_dates`` / fund profile
+#     reads (Security Master, Lookthrough, Fund Holdings tabs).
+#   * Reporting's ad-hoc ``calculate_returns`` / ``calculate_cumulative_returns``
+#     for the chart panels.
+#
+# The ratchet lint in ``tests/test_lint_domain_layering.py`` counts direct
+# domain-class references in this file and prevents NEW ones — clean up by
+# building a service and dropping the count.
+
 @st.cache_resource
 def _make_db(data_dir: str) -> Database:
     return Database(data_dir)
@@ -74,10 +92,12 @@ def _make_reporting(data_dir: str) -> ReportingEngine:
 
 
 def get_db() -> Database:
+    """Cached Database for the active data dir. Escape-hatch only — see comment above."""
     return _make_db(_active_data_dir())
 
 
 def get_reporting() -> ReportingEngine:
+    """Cached ReportingEngine for the active data dir. Escape-hatch only — see comment above."""
     return _make_reporting(_active_data_dir())
 
 
@@ -559,15 +579,19 @@ with st.sidebar:
         key="sidebar_refresh_metrics_btn",
         help="Recompute the daily returns/risk/attribution time series for every portfolio.",
     ):
-        from src.attribution import AttributionEngine
+        from src.services.production import refresh_metrics
+        from src.services.schemas.production import MetricsRefreshRequest
         with st.spinner("Computing daily metrics…"):
-            summary = AttributionEngine(get_db()).refresh_all()
+            summary = refresh_metrics(
+                _active_data_dir(), MetricsRefreshRequest(),
+            ).summary
         modes = summary.get("modes", {})
         v2 = [n for n, m in modes.items() if m == "trade_replay"]
         v1 = [n for n, m in modes.items() if m == "static_current"]
         msg = (
-            f"Refreshed metrics — sec: {summary['security_rows']}, "
-            f"port: {summary['portfolio_rows']}, attr: {summary['attribution_rows']}"
+            f"Refreshed metrics — sec: {summary.get('security_rows', 0)}, "
+            f"port: {summary.get('portfolio_rows', 0)}, "
+            f"attr: {summary.get('attribution_rows', 0)}"
         )
         if v2 or v1:
             msg += f"\n\nMode used: trade replay → {', '.join(v2) or '—'}; static current → {', '.join(v1) or '—'}"
@@ -2793,12 +2817,21 @@ with tab_risk:
             with col_re:
                 st.write("")  # vertical alignment with the inputs above
                 if st.button("Refresh betas", key="refresh_sector_betas_btn"):
+                    # Route through the production-jobs service so the same
+                    # logic runs whether the user clicks here or kicks the
+                    # scheduled "refresh_sector_betas" job.
+                    from src.services.production import run_job as service_run_job
                     try:
                         with st.spinner("Fetching 20y of SPDR sector ETFs from yfinance…"):
-                            new_betas = Collector.fetch_sector_betas(years=20)
-                            get_db().save_sector_betas(new_betas)
-                        st.success(f"Computed {len(new_betas)} pairwise betas (20y window).")
-                        st.rerun()
+                            result = service_run_job(
+                                _active_data_dir(), "refresh_sector_betas", force=True,
+                            )
+                        if result.status == "success":
+                            rows = (result.details or {}).get("betas_rows", "?")
+                            st.success(f"Computed {rows} pairwise betas (20y window).")
+                            st.rerun()
+                        else:
+                            st.error(f"Could not refresh betas: {result.error}")
                     except Exception as exc:
                         st.error(f"Could not refresh betas: {exc}")
 
