@@ -103,10 +103,17 @@ def run_job(data_dir: str, job_name: str, force: bool = False) -> RunResult:
 
 
 def set_job_enabled(data_dir: str, job_name: str, enabled: bool) -> JobStatus:
-    """Flip a job's ``enabled`` flag. Raises ``ValueError`` if unknown."""
+    """Flip a job's ``enabled`` flag. Raises ``ValueError`` if unknown.
+
+    Instantiating ``JobRunner`` first runs the idempotent
+    ``_ensure_jobs_seeded`` step, so the row that ``upsert_production_job``
+    targets already carries the ``interval_minutes`` / ``last_status``
+    defaults from ``JOB_REGISTRY`` rather than NaN.
+    """
     if job_name not in JOB_REGISTRY:
         raise ValueError(f"Job {job_name!r} not found.")
     db = _get_db(data_dir)
+    JobRunner(db)  # idempotent seed
     db.upsert_production_job(job_name, enabled=enabled)
     return get_job(data_dir, job_name)
 

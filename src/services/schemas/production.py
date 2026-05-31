@@ -8,19 +8,26 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-JobStatusValue = Literal["never_run", "success", "error", "running"]
+# Status of a finished ``run_job`` call. Constrained because the job
+# runner only ever writes these three values.
 RunStatus = Literal["success", "error", "skipped"]
 
 
 class JobStatus(BaseModel):
-    """One row in the production-jobs catalogue."""
+    """One row in the production-jobs catalogue.
+
+    ``last_status`` is a free-form string rather than a ``Literal`` so
+    the API doesn't reject a parquet row written by an older / newer
+    job runner that knows about additional statuses. Today the runner
+    writes ``"never_run"``, ``"success"``, ``"error"``, or ``"running"``.
+    """
 
     job_name: str
     description: str = ""
     enabled: bool
     interval_minutes: int
     last_run_at: datetime | None = None
-    last_status: JobStatusValue | str = "never_run"
+    last_status: str = "never_run"
     last_error: str = ""
     last_duration_seconds: float | None = None
     is_due: bool

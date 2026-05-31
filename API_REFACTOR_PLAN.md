@@ -263,7 +263,7 @@ then long-running and streaming-flavoured pieces last.
 | # | Question | Default |
 |---|---|---|
 | Q1 | Should the API run as a separate process, or can Streamlit talk to services in-process? | **Both supported**: Streamlit calls services directly; CLI's `serve` boots FastAPI for external clients. |
-| Q2 | Auth? | **None in v1** (loopback only). Stub a header-based key check that's a no-op by default. |
+| Q2 | Auth? | **None in v1** (loopback only). Stub a header-based key check that's a no-op by default. **Gating item for non-localhost deployment** — see §11. |
 | Q3 | Streaming agent responses (SSE/WebSocket)? | **Defer.** First version returns the full agent reply once the tool runner finishes. Open follow-up for streaming. |
 | Q4 | Persistent agent sessions across server restarts? | **Defer.** v1 keeps sessions in an in-process dict. Already matches today's behaviour. |
 | Q5 | DataFrame serialisation format? | **`{columns, rows}`** for JSON; future versions can negotiate Arrow over `application/vnd.apache.arrow.stream`. |
@@ -297,3 +297,52 @@ then long-running and streaming-flavoured pieces last.
 | Agent session lifecycle (HITL pauses, summaries) is stateful | Server-side session cache keyed by UUID; `start_chat` returns the id, all subsequent calls pass it. Mirrors the Streamlit `session_state` model. |
 | FastAPI dep adds startup cost / one more process | `serve` is opt-in via a CLI command; the package import path stays usable without it. |
 | Hidden Streamlit-specific assumptions (caching via `@st.cache_*`) | Service layer is pure — caching moves to a service-level decorator using `functools.lru_cache` keyed on `(data_dir, …)`. |
+
+## 11. Gating items before non-localhost deployment
+
+The API is currently safe to run on `127.0.0.1` and only on `127.0.0.1`.
+The items below MUST be resolved before binding to a non-loopback
+interface, exposing through a reverse proxy, or running behind any kind
+of authenticated tunnel.
+
+### 11.1 Authentication / authorisation
+
+- **State today:** every endpoint is anonymous. `POST /production/jobs/{name}/run`,
+  `POST /production/metrics-refresh`, and the agent / trading-graph
+  surfaces all execute privileged work for any caller.
+- **Required:** at minimum, a bearer-token / API-key middleware. Optional
+  per-route ACLs once the threat model is fleshed out.
+
+### 11.2 `X-Data-Dir` path traversal
+
+- **State today:** `src/api/deps.py:data_dir_dep` reads the header
+  verbatim. Callers can point the server at any filesystem path the
+  process can read and write — `/etc`, `/`, `/home/<user>/...`, etc.
+- **Required:** clamp `data_dir` to a configured allowlist of directories
+  (e.g. `{"data", "data_demo"}` resolved against the project root) and
+  reject anything else with 400.
+- **Defence in depth:** drop the env-var fallback in production-mode
+  builds so the data dir can only come from a vetted set.
+
+### 11.3 Long-running endpoints are DoS-shaped
+
+- **State today:** `POST /prices/collect`, `POST /production/jobs/.../run`,
+  and `POST /production/metrics-refresh` are synchronous and can hold a
+  worker for minutes. An unauthenticated caller can trivially exhaust
+  the worker pool.
+- **Required:** rate limiting on those endpoints, or move them to a
+  background-job queue with the HTTP surface limited to "enqueue" +
+  "poll status". The background-jobs slice noted in API_REFACTOR_PLAN.md
+  §7 Q3 covers this.
+
+### 11.4 Session / run IDs are unguessable but unowned
+
+- **State today:** `/agents/sessions/{id}` and `/trading-graph/runs/{id}`
+  rely on UUID4 IDs. Any caller who knows the ID can read history,
+  resume, or override state.
+- **Required:** once auth lands, scope sessions and runs to the
+  authenticated principal so an ID is necessary but not sufficient.
+
+The body-size middleware already protects against trivial upload-based
+DoS (capped at 10 MB, chunked uploads enforced by the receive-wrapper
+branch — see `tests/api/test_middleware.py`). That part can ship as-is.
