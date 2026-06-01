@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from src.api.auth import APIKeyAuthMiddleware
 from src.api.errors import register_error_handlers
 from src.api.middleware import DEFAULT_MAX_BODY_BYTES, BodySizeLimitMiddleware
 from src.api.routers import (
@@ -35,11 +36,21 @@ app = FastAPI(
         "(see ``src.api.middleware``). Note that ``POST /prices/collect`` is "
         "synchronous and long-running — each ticker triggers an outbound "
         "yfinance download, so a single request can hold a worker for "
-        "minutes when run against a large portfolio."
+        "minutes when run against a large portfolio.\n\n"
+        "**Optional auth**: when ``INVEST_MONITOR_API_KEY`` is set, every "
+        "endpoint except ``/health``, ``/docs``, ``/redoc``, and "
+        "``/openapi.json`` requires ``Authorization: Bearer <key>`` or "
+        "``X-API-Key: <key>``. When ``INVEST_MONITOR_ALLOWED_DATA_DIRS`` is "
+        "set, the ``X-Data-Dir`` header is validated against the list "
+        "(rejected with 400 otherwise)."
     ),
 )
 
+# Order matters — last add_middleware is the outermost layer. Auth must
+# run BEFORE the body-size middleware so unauthenticated callers can't
+# even submit a 10 MB body, which means: add body-size first, then auth.
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=DEFAULT_MAX_BODY_BYTES)
+app.add_middleware(APIKeyAuthMiddleware)
 register_error_handlers(app)
 
 app.include_router(portfolios.router)

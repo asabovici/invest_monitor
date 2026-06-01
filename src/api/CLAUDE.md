@@ -9,9 +9,10 @@ Business logic lives in `src/services/`.
 ```
 src/api/
 ├── main.py              # `app = FastAPI(...)`, mounts middleware/routers/handlers
-├── deps.py              # Shared FastAPI dependencies (data_dir_dep)
+├── deps.py              # Shared FastAPI dependencies (data_dir_dep + allowlist)
 ├── errors.py            # Global ValueError → HTTP exception handler
 ├── middleware.py        # Body-size-limit ASGI middleware
+├── auth.py              # Opt-in API-key auth (env-var-gated)
 ├── routers/             # One file per resource
 │   ├── agents.py
 │   ├── benchmarks.py
@@ -79,6 +80,29 @@ Depends(data_dir_dep)]`. The dependency resolves the data dir from:
 Mirrors the Streamlit sidebar's live/demo toggle. No URL changes needed
 to switch datasets. Routes that don't touch storage (e.g. `/health`,
 `/agents/kinds`) omit the dep.
+
+**Path-traversal guard.** Setting `INVEST_MONITOR_ALLOWED_DATA_DIRS`
+(comma-separated) enforces an allowlist — the resolved value must match
+one of the entries or the dep raises 400. When the env var is unset (the
+default) the legacy permissive behaviour is preserved so tests using
+`tmp_path` keep working. The allowlist also validates the env-var
+default, so a misconfigured `INVEST_MONITOR_DATA_DIR` can't slip
+through.
+
+### Auth (opt-in)
+
+`APIKeyAuthMiddleware` is mounted by default but only activates when
+`INVEST_MONITOR_API_KEY` is set. With auth enabled:
+
+- Every endpoint except `/health`, `/docs`, `/redoc`, `/openapi.json`
+  requires `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+- 401 with `WWW-Authenticate: Bearer realm="invest-monitor"` on missing
+  or wrong credential.
+- The middleware sits **outside** `BodySizeLimitMiddleware` so an
+  unauthenticated caller can't even submit a body.
+
+For network deployment combine both: `INVEST_MONITOR_API_KEY=<secret>`
+plus `INVEST_MONITOR_ALLOWED_DATA_DIRS=data`.
 
 ### Schemas
 

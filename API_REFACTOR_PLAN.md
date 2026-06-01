@@ -263,7 +263,7 @@ then long-running and streaming-flavoured pieces last.
 | # | Question | Default |
 |---|---|---|
 | Q1 | Should the API run as a separate process, or can Streamlit talk to services in-process? | **Both supported**: Streamlit calls services directly; CLI's `serve` boots FastAPI for external clients. |
-| Q2 | Auth? | **None in v1** (loopback only). Stub a header-based key check that's a no-op by default. **Gating item for non-localhost deployment** — see §11. |
+| Q2 | Auth? | **Opt-in API key**: ``APIKeyAuthMiddleware`` (no-op when ``INVEST_MONITOR_API_KEY`` unset; enforces Bearer / X-API-Key when set). See §11.1 + §11.2 — both implemented. |
 | Q3 | Streaming agent responses (SSE/WebSocket)? | **Defer.** First version returns the full agent reply once the tool runner finishes. Open follow-up for streaming. |
 | Q4 | Persistent agent sessions across server restarts? | **Defer.** v1 keeps sessions in an in-process dict. Already matches today's behaviour. |
 | Q5 | DataFrame serialisation format? | **`{columns, rows}`** for JSON; future versions can negotiate Arrow over `application/vnd.apache.arrow.stream`. |
@@ -305,24 +305,44 @@ The items below MUST be resolved before binding to a non-loopback
 interface, exposing through a reverse proxy, or running behind any kind
 of authenticated tunnel.
 
-### 11.1 Authentication / authorisation
+### 11.1 Authentication / authorisation — ✅ DONE (env-var-gated)
 
-- **State today:** every endpoint is anonymous. `POST /production/jobs/{name}/run`,
-  `POST /production/metrics-refresh`, and the agent / trading-graph
-  surfaces all execute privileged work for any caller.
-- **Required:** at minimum, a bearer-token / API-key middleware. Optional
-  per-route ACLs once the threat model is fleshed out.
+- **Implementation:** ``src/api/auth.py:APIKeyAuthMiddleware``.
+- **Activation:** set ``INVEST_MONITOR_API_KEY=<secret>`` on the server.
+  When unset, the middleware is a no-op (preserves localhost-only dev
+  behaviour). When set, every endpoint except ``/health``, ``/docs``,
+  ``/redoc``, ``/openapi.json`` requires
+  ``Authorization: Bearer <key>`` or ``X-API-Key: <key>``. Other auth
+  schemes (Basic, etc.) are rejected.
+- **Ordering:** auth wraps body-size middleware, so an unauthenticated
+  caller can't even submit a 10 MB body. Verified by
+  ``tests/api/test_auth_and_data_dir.py::test_auth_runs_before_body_size_limit``.
+- **Constant-time comparison:** ``hmac.compare_digest`` is used so a
+  network attacker can't recover the key one byte at a time via
+  response-time measurement.
+- **Follow-up:** per-route ACLs and per-principal session ownership
+  (§11.4) remain open.
+- **Hardening reminder:** auth alone gates *who*, not *how much*. The
+  same authenticated client can still hammer the long-running endpoints
+  (``/prices/collect``, ``/production/jobs/.../run``,
+  ``/production/metrics-refresh``) to exhaustion. The rate-limiting work
+  in §11.3 is the matching half — combine both before going public.
 
-### 11.2 `X-Data-Dir` path traversal
+### 11.2 `X-Data-Dir` path traversal — ✅ DONE (env-var-gated)
 
-- **State today:** `src/api/deps.py:data_dir_dep` reads the header
-  verbatim. Callers can point the server at any filesystem path the
-  process can read and write — `/etc`, `/`, `/home/<user>/...`, etc.
-- **Required:** clamp `data_dir` to a configured allowlist of directories
-  (e.g. `{"data", "data_demo"}` resolved against the project root) and
-  reject anything else with 400.
-- **Defence in depth:** drop the env-var fallback in production-mode
-  builds so the data dir can only come from a vetted set.
+- **Implementation:** ``src/api/deps.py:data_dir_dep`` checks the resolved
+  value against ``INVEST_MONITOR_ALLOWED_DATA_DIRS`` (comma-separated
+  list). When the env var is unset, no enforcement (legacy behaviour);
+  when set, anything off-list returns 400.
+- **Defence in depth:** the env-var default ``INVEST_MONITOR_DATA_DIR``
+  is validated too — a misconfigured default can't slip through.
+- **Recommended production config:**
+
+  ```
+  INVEST_MONITOR_API_KEY=<long random secret>
+  INVEST_MONITOR_ALLOWED_DATA_DIRS=data
+  INVEST_MONITOR_DATA_DIR=data
+  ```
 
 ### 11.3 Long-running endpoints are DoS-shaped
 
