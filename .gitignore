@@ -7,3 +7,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 data*/reports/
+agent_summaries.json
