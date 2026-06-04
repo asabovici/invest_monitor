@@ -344,16 +344,25 @@ of authenticated tunnel.
   INVEST_MONITOR_DATA_DIR=data
   ```
 
-### 11.3 Long-running endpoints are DoS-shaped
+### 11.3 Long-running endpoints are DoS-shaped — ✅ DONE (env-var-gated rate limit)
 
-- **State today:** `POST /prices/collect`, `POST /production/jobs/.../run`,
-  and `POST /production/metrics-refresh` are synchronous and can hold a
-  worker for minutes. An unauthenticated caller can trivially exhaust
-  the worker pool.
-- **Required:** rate limiting on those endpoints, or move them to a
-  background-job queue with the HTTP surface limited to "enqueue" +
-  "poll status". The background-jobs slice noted in API_REFACTOR_PLAN.md
-  §7 Q3 covers this.
+- **Implementation:** ``src/api/rate_limit.py:RateLimitMiddleware``.
+- **Activation:** set ``INVEST_MONITOR_RATE_LIMIT="N/seconds"`` (e.g.
+  ``"10/60"``) or just ``"N"`` (default window 60 s). Unset → no-op.
+- **Scope:** ``POST /prices/collect``, ``POST /production/jobs/<name>/run``,
+  ``POST /production/run-due``, ``POST /production/metrics-refresh``.
+  Reads + CRUD are unaffected.
+- **Client identification:** ``sha256(api_key)[:16]`` when a credential
+  is present, client IP otherwise — different keys get separate
+  buckets, so one authenticated client can't burn another's budget.
+- **Ordering:** auth → rate-limit → body-size → app. Anonymous traffic
+  still gets 401 (not 429), and an attacker can't waste rate-limit
+  tokens by submitting oversized bodies.
+- **Response:** 429 with ``Retry-After`` set to the time until one
+  token regenerates.
+- **Background-job migration** (the alternative half of §11.3 that
+  swaps these endpoints to "enqueue + poll") remains a future slice
+  for a fully asynchronous deployment.
 
 ### 11.4 Session / run IDs are unguessable but unowned
 

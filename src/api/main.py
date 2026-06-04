@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from src.api.auth import APIKeyAuthMiddleware
 from src.api.errors import register_error_handlers
 from src.api.middleware import DEFAULT_MAX_BODY_BYTES, BodySizeLimitMiddleware
+from src.api.rate_limit import RateLimitMiddleware
 from src.api.routers import (
     agents,
     benchmarks,
@@ -42,14 +43,22 @@ app = FastAPI(
         "``/openapi.json`` requires ``Authorization: Bearer <key>`` or "
         "``X-API-Key: <key>``. When ``INVEST_MONITOR_ALLOWED_DATA_DIRS`` is "
         "set, the ``X-Data-Dir`` header is validated against the list "
-        "(rejected with 400 otherwise)."
+        "(rejected with 400 otherwise). When ``INVEST_MONITOR_RATE_LIMIT`` "
+        "is set (e.g. ``10/60``), the long-running endpoints are token-"
+        "bucket throttled and respond with 429 + ``Retry-After`` once the "
+        "bucket is empty."
     ),
 )
 
-# Order matters — last add_middleware is the outermost layer. Auth must
-# run BEFORE the body-size middleware so unauthenticated callers can't
-# even submit a 10 MB body, which means: add body-size first, then auth.
+# Order matters — last add_middleware is the OUTERMOST layer (it runs
+# first per request). Target execution order: Auth → Rate-limit → Body-
+# size → app. We mount in reverse: body-size first (innermost), then
+# rate-limit, then auth (outermost). Rationale:
+# - Auth before rate-limit so anonymous traffic gets 401, not 429.
+# - Body-size after rate-limit so the heavy-endpoint budget isn't spent
+#   parsing oversized bodies.
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=DEFAULT_MAX_BODY_BYTES)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(APIKeyAuthMiddleware)
 register_error_handlers(app)
 

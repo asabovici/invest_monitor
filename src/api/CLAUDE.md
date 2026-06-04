@@ -13,6 +13,7 @@ src/api/
 ├── errors.py            # Global ValueError → HTTP exception handler
 ├── middleware.py        # Body-size-limit ASGI middleware
 ├── auth.py              # Opt-in API-key auth (env-var-gated)
+├── rate_limit.py        # Opt-in token-bucket rate limit (env-var-gated)
 ├── routers/             # One file per resource
 │   ├── agents.py
 │   ├── benchmarks.py
@@ -101,8 +102,34 @@ through.
 - The middleware sits **outside** `BodySizeLimitMiddleware` so an
   unauthenticated caller can't even submit a body.
 
-For network deployment combine both: `INVEST_MONITOR_API_KEY=<secret>`
-plus `INVEST_MONITOR_ALLOWED_DATA_DIRS=data`.
+For network deployment combine three: `INVEST_MONITOR_API_KEY=<secret>`,
+`INVEST_MONITOR_ALLOWED_DATA_DIRS=data`, and
+`INVEST_MONITOR_RATE_LIMIT=10/60` (see below).
+
+### Rate limit (opt-in)
+
+`RateLimitMiddleware` token-buckets the long-running endpoints so a
+single authenticated client can't exhaust the worker pool by hammering
+`/prices/collect`, `/production/jobs/<name>/run`, `/production/run-due`,
+or `/production/metrics-refresh`. Anything else (reads, CRUD, exempt
+paths) is unlimited.
+
+- **Config:** `INVEST_MONITOR_RATE_LIMIT="N/seconds"` (e.g. `10/60`) or
+  just `"N"` (default window = 60 s). Unset → no-op.
+- **Client id:** `sha256(api_key)[:16]` when an `Authorization: Bearer`
+  or `X-API-Key` is present (so different authenticated clients each
+  get their own budget); falls back to client IP, then `"anonymous"`.
+- **Ordering:** mounted between auth and body-size so the execution
+  order is **auth → rate-limit → body-size → app**. Anonymous traffic
+  sees 401 (not 429), and the heavy-endpoint budget isn't spent parsing
+  oversized bodies.
+- **Response:** 429 with `Retry-After` seconds set to the time until
+  the bucket regenerates one token.
+- **State:** process-local dict. Behind a load balancer each instance
+  has its own buckets — divide the limit by N instances or move to a
+  shared backend later.
+- **Test hook:** `src.api.rate_limit.reset_buckets()` clears the store
+  for hermetic tests; see `tests/api/test_rate_limit.py`.
 
 ### Schemas
 
