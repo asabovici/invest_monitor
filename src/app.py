@@ -42,7 +42,20 @@ from src.services.benchmarks import (
     benchmark_stats as service_benchmark_stats,
     list_benchmarks as service_list_benchmarks,
 )
+from src.services.groups import (
+    create_group as service_create_group,
+    delete_group as service_delete_group,
+    get_groups_for_portfolio as service_get_groups_for_portfolio,
+    list_groups as service_list_groups,
+    set_group_members as service_set_group_members,
+    set_groups_for_portfolio as service_set_groups_for_portfolio,
+)
+from src.services.trades import (
+    list_trades as service_list_trades,
+    record_trade as service_record_trade,
+)
 from src.services.schemas.portfolio import PositionInput
+from src.services.schemas.trade import RecordTradeRequest
 # The dashboard now talks to chat agents through ``src.services.agents`` so
 # the Anthropic client lives on the server side. Agent classes themselves
 # are still importable from ``src.agent`` for CLI and programmatic use.
@@ -2729,7 +2742,7 @@ with tab_risk:
                 weights /= weights.sum()
                 port_returns = reporting.calculate_returns(tickers).dot(weights)
 
-                hist_var = metrics["Historical VaR (95%)"]
+                hist_var = risk_report.historical_var_95
                 fig_dist = go.Figure()
                 fig_dist.add_trace(go.Histogram(
                     x=port_returns,

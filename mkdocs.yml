@@ -1,5 +1,5 @@
 site_name: Invest Monitor
-site_description: Personal investment-portfolio analytics — Streamlit dashboard, CLI, and three Claude-powered agents.
+site_description: Personal investment-portfolio analytics — Streamlit dashboard, CLI, FastAPI HTTP surface, and five Claude-powered agents.
 site_url: https://example.com/invest-monitor/
 repo_url: https://github.com/anthropics/invest_monitor
 repo_name: invest_monitor
@@ -92,6 +92,7 @@ nav:
     - Wealth Projection: wealth-projection.md
     - Risk: risk.md
   - CLI Reference: cli.md
+  - HTTP API: api.md
   - AI Agents: ai-agents.md
   - Multi-Agent Graph: multi-agent-graph.md
   - Conversation Summaries: conversation-summaries.md
