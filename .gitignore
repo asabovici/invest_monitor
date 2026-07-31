@@ -8,3 +8,5 @@ __pycache__/
 .pytest_cache/
 data*/reports/
 agent_summaries.json
+data*/.backups/
+audit_log.jsonl

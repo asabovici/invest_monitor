@@ -1,6 +1,6 @@
 # Conversational agents
 
-Five Claude-powered agents that share one architectural pattern. Each is a
+Six Claude-powered agents that share one architectural pattern. Each is a
 single-actor tool-runner with multi-turn history. They are **not** the
 LangGraph multi-agent coordination system (see `src/trading_graph/`) —
 the PM and CIO classes here are the human-facing chat counterparts to
@@ -15,10 +15,11 @@ those graph nodes.
 | `research_agent.py` | `ResearchAgent` | `invest-monitor research` | Web search + portfolio simulation for capital deployment |
 | `portfolio_manager_agent.py` | `PortfolioManagerAgent` | `invest-monitor pm` | Build defensible trade proposals |
 | `cio_agent.py` | `CIOAgent` | `invest-monitor cio` | Approve / override / kick back proposals |
+| `data_agent.py` | `DataAgent` | `invest-monitor data` | **Writes.** Correct positions, security master, prices, fund holdings |
 
-All five are exported from `src/agent/__init__.py`.
+All six are exported from `src/agent/__init__.py`.
 
-- **CLI** (`invest-monitor agent`, `wealth`, `research`, `pm`, `cio`)
+- **CLI** (`invest-monitor agent`, `wealth`, `research`, `pm`, `cio`, `data`)
   instantiates the agent class directly and drives a `run_interactive()`
   REPL. Stays direct because the input()-loop doesn't benefit from HTTP
   indirection.
@@ -31,6 +32,27 @@ All five are exported from `src/agent/__init__.py`.
   `/agents/sessions/{id}/prime`, `/agents/sessions/{id}/history`.
   Sessions don't survive uvicorn restarts — use `/summaries` for
   persistent context.
+
+## The data agent is the only one that mutates
+
+The other five read and reason. `DataAgent` changes stored records, so its
+skills are built on a preview/apply gate in `src/services/datafix.py`: every
+mutating skill returns a rendered diff plus a `change_id` and writes nothing;
+only `apply_change` commits, taking a backup into `<data_dir>/.backups/<stamp>/`
+and appending to `<data_dir>/audit_log.jsonl`. Three things worth knowing:
+
+- **Retroactive position fixes go through the trade ledger.** Positions carry
+  no time dimension, so the agent corrects a dated trade and replays the
+  ledger. `_replay_ledger` must stay in lockstep with
+  `Database._apply_trade_to_positions` or a replay silently rewrites correct
+  data — `test_replay_of_untouched_ledger_is_a_noop` pins this.
+- **Replay only governs tickers the ledger covers.** Positions imported from a
+  CSV have no trades behind them; a naive replay would delete every one.
+  `_merge_untracked` leaves them alone; a ledger-covered ticker that sells to
+  zero is still removed.
+- **Staged changes are process-local and single-use.** Same convention as the
+  other session caches — `datafix.reset_staged()` for tests. An applied change
+  is dropped so one approval can't be replayed.
 
 ## The pattern
 
@@ -48,7 +70,7 @@ class XAgent:
 ```
 
 - **Model**: `claude-opus-4-6` with `thinking={"type": "adaptive"}`. Don't
-  change without coordinating across all 5 agents.
+  change without coordinating across all 6 agents.
 - **Tool runner**: `client.beta.messages.tool_runner(...)` auto-loops on
   tool calls until the model returns a final text block.
 - **History**: only the final assistant text is appended, never
@@ -65,6 +87,7 @@ class XAgent:
 | `research_skills.py` | 5 + `web_search_20260209` | Capital deployment |
 | `pm_skills.py` | 7 | Trade proposals (includes `export_report`) |
 | `cio_skills.py` | 7 | Holistic oversight (includes `export_report`) |
+| `data_skills.py` | 16 | Data correction — all mutations behind a preview/apply gate |
 
 `report_export.py` is the shared `export_report(filename, markdown_content,
 overwrite=False)` skill — Wealth / PM / CIO all get it via
@@ -79,7 +102,7 @@ overwrite=False)` skill — Wealth / PM / CIO all get it via
   silently fails after reload. Always use `.value in {"ETF", "Fund"}`.
 - **Conversation summaries** (`src/agent_summaries.py`) compress chats via
   Haiku and persist to `<data_dir>/agent_summaries.json`. Keyed on agent
-  name (`risk`, `wealth`, `research`, `pm`, `cio`) — adding a new agent
+  name (`risk`, `wealth`, `research`, `pm`, `cio`, `data`) — adding a new agent
   just adds another key, no migration needed. The service wrapper at
   `src/services/summaries.py` is what clients should call; it reuses the
   session's own Anthropic client to avoid a second instantiation.

@@ -648,6 +648,35 @@ def cio(portfolio_name, query):
 
 
 @cli.command()
+@click.option("--scan", is_flag=True, default=False,
+              help="Open with a full data-integrity scan.")
+@click.option("--query", default=None,
+              help="Run a single query and exit (non-interactive).")
+def data(scan, query):
+    """Chat with the data agent to find and correct bad data.
+
+    Fixes positions, the security master, price history and fund holdings.
+    Corrections are retroactive: a position is repaired by correcting the
+    underlying trade and replaying the ledger. Every change is previewed as
+    a diff and written only after you approve it, with a backup and an audit
+    entry on each apply.
+
+    Examples:\n
+      invest-monitor data --scan\n
+      invest-monitor data --query "Which tickers have gaps in their price history?"\n
+      invest-monitor data --query "Trade 41 was booked at 120.44 but should be 89.92"
+    """
+    from src.agent import DataAgent
+
+    agent_instance = DataAgent()
+
+    if query:
+        click.echo(agent_instance.run_query(query))
+    else:
+        agent_instance.run_interactive(initial_scan=scan)
+
+
+@cli.command()
 @click.option("--host", default="127.0.0.1", show_default=True,
               help="Interface to bind. Use 0.0.0.0 to listen on all interfaces.")
 @click.option("--port", default=8000, type=int, show_default=True)

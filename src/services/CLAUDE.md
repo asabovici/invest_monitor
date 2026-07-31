@@ -37,6 +37,7 @@ src/services/
 ├── agents.py          # chat sessions: start / message / prime / end + history
 ├── summaries.py       # list / get / delete / save_summary_from_session
 ├── trading_graph.py   # start_run / get_run_state / resume_run / end_run
+├── datafix.py         # data correction: preview/apply gate, ledger replay, backups
 └── production.py      # list_jobs / get / set_enabled / run / run_due / list_runs / refresh_metrics
 ```
 
@@ -95,9 +96,25 @@ runs don't leak across cases.
 | `agents.py` | `_sessions: dict[session_id, _AgentSession]` | `reset_sessions()` |
 | `trading_graph.py` | `_runs: dict[run_id, _RunRecord]` + `_get_compiled_graph` LRU | `reset_runs()` |
 | `_db.py` | `_get_db.cache` | `reset_db_cache()` |
+| `datafix.py` | `_staged: dict[change_id, _Staged]` | `reset_staged()` |
 
 Sessions are lost across uvicorn restarts. v2 will add persistence (likely
 via the same `agent_summaries.json` store for agent sessions).
+
+## The one mutating-by-design service
+
+`datafix.py` exists to correct existing records, so it does not follow the
+usual "call it and it happens" shape. Every mutating entry point is a
+`preview_*` function that computes a diff, stages it, and writes nothing;
+`apply_change(change_id)` is the only thing that touches disk, and it backs up
+each affected file to `<data_dir>/.backups/<stamp>/` and appends to
+`<data_dir>/audit_log.jsonl` first. Changes are single-use.
+
+Positions are corrected *through the trade ledger* (`preview_trade_correction`
+/ `_insert` / `_delete`) rather than edited directly, because `positions.parquet`
+has no time dimension and a direct edit would leave the ledger disagreeing.
+`_replay_ledger` mirrors `Database._apply_trade_to_positions` exactly — if you
+change one, change both, or replays will silently rewrite correct data.
 
 ## Long-running endpoints
 

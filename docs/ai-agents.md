@@ -17,17 +17,19 @@ The five agents fall into two groups:
     invest-monitor research --portfolio "My Portfolio"   # Research
     invest-monitor pm --portfolio "My Portfolio"         # Portfolio Manager
     invest-monitor cio --portfolio "My Portfolio"        # CIO
+    invest-monitor data --scan                           # Data (corrections)
 
     # One-shot queries
     invest-monitor agent --query "Which portfolio has the highest VaR?"
     invest-monitor wealth --query "Am I on track to reach $500k in 10y?"
     invest-monitor pm --query "Propose a 60/40 deployment of $50k into VTI and BND"
     invest-monitor cio --query "Review this proposal: deploy $25k as {AAPL: 0.5, MSFT: 0.5}"
+    invest-monitor data --query "Which tickers have gaps in their price history?"
     ```
 
 === "Dashboard"
 
-    Multi-Portfolio Dashboard → **🤖 Ask the Agents** section. Five tabs (Risk / Wealth / Research / PM / CIO). Each tab keeps its own history and is scoped to the active data dir (live vs demo). Lazy instantiation: the `Anthropic()` client is only built when you send the first message in a tab, so a missing `ANTHROPIC_API_KEY` shows a clear inline error instead of crashing the dashboard.
+    Multi-Portfolio Dashboard → **🤖 Ask the Agents** section. Six tabs (Risk / Wealth / Research / PM / CIO / Data). Each tab keeps its own history and is scoped to the active data dir (live vs demo). Lazy instantiation: the `Anthropic()` client is only built when you send the first message in a tab, so a missing `ANTHROPIC_API_KEY` shows a clear inline error instead of crashing the dashboard.
 
     Each tab also has a **💾 Save summary** button (compress + persist the chat) and a **📂 Load past conversation context** expander (re-prime the agent with any past summary, even from a different agent). See [Conversation Summaries](conversation-summaries.md).
 
@@ -157,3 +159,50 @@ Conversational counterpart to the `cio` node. Reviews proposals against firm-lev
 - *"Give me a CIO view of 'My Portfolio'."*
 - *"Review this proposal: deploy $50k as {VTI: 0.6, BND: 0.4} into 'My Portfolio'."*
 - *"The PM is proposing {AAPL: 0.5, MSFT: 0.5} for $30k — does it pass our concentration caps?"*
+
+---
+
+## Data Agent (16 skills)
+
+The only agent that **modifies** stored data. It corrects positions, the security master, price history, and fund holdings.
+
+### The approval gate
+
+Every fix skill returns a diff and a `change_id` and **writes nothing**. Committing is a separate, explicit step:
+
+```
+You:   PRU's cost basis looks wrong — it should be 89.92
+Agent: [correct_trade]
+         PROPOSED (trades) — Correct trade 41 and replay 'Demo Brokerage' ledger
+           update trade 41: trade_price 120.44 -> 89.92
+           update Demo Brokerage / PRU: cost_basis 120.44 -> 89.92
+         NOTHING HAS BEEN WRITTEN. To commit: apply_change('chg_7f2a').
+
+You:   apply it
+Agent: [apply_change] APPLIED chg_7f2a
+         backup: data/.backups/20260730-2011/
+         audit:  data/audit_log.jsonl
+```
+
+`apply_change` backs up every affected file first and appends to the audit log. A change can only be applied once. Both `data*/.backups/` and `audit_log.jsonl` are gitignored.
+
+### Retroactive corrections
+
+`positions.parquet` holds only current state — there is no position history. So a position is corrected by fixing the **dated trade** behind it and replaying the ledger, which keeps history truthful and the position derived rather than hand-edited.
+
+Positions that have no trades at all (typically imported opening balances) are left untouched by a replay. Give one a ledger entry with `seed_opening_balance` if you want later corrections to replay cleanly.
+
+!!! warning "cost_basis is per share"
+    Never a total. The agent warns when a proposed cost basis moves by more than 10x, which is the signature of a total-vs-per-share mix-up.
+
+### Fill-forward
+
+`fill_prices_forward` carries the last known price across missing business days, and extends to `through_date` if given. It refuses any single carried run longer than `max_run_days` (default 30) and warns beyond 7, because a long flat stretch understates measured volatility and drawdown. Collect real prices where you can.
+
+### Example queries
+
+- *"Scan the database and tell me what's broken."*
+- *"Trade 41 was booked at 120.44 but the real price was 89.92."*
+- *"ARTY is missing three weeks of prices — fill them forward through Friday."*
+- *"CRST is tagged as a Stock but it's an ETF."*
+- *"What corrections have been applied recently?"*

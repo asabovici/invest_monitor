@@ -16,10 +16,10 @@ The rest of this document covers the conversational agents.
 The five conversational agents are all powered by **Claude Opus 4.6 with adaptive thinking** and the Anthropic beta tool runner. Each agent maintains multi-turn conversation history so follow-up questions work without repeating context.
 
 You can talk to them four ways:
-1. **CLI** — `invest-monitor agent`, `invest-monitor wealth`, `invest-monitor research`, `invest-monitor pm`, `invest-monitor cio`. The CLI instantiates the agent class directly and drives an interactive REPL.
-2. **Streamlit dashboard** — embedded chat panel at the bottom of the Multi-Portfolio Dashboard under **🤖 Ask the Agents**, with a tab per agent (Risk / Wealth / Research / PM / CIO). Each tab keeps its own history and is scoped to the active data dir (live vs demo). The dashboard goes through `src/services/agents.py`, which holds a process-local UUID-keyed session cache; agents are instantiated lazily on the first message.
+1. **CLI** — `invest-monitor agent`, `invest-monitor wealth`, `invest-monitor research`, `invest-monitor pm`, `invest-monitor cio`, `invest-monitor data`. The CLI instantiates the agent class directly and drives an interactive REPL.
+2. **Streamlit dashboard** — embedded chat panel at the bottom of the Multi-Portfolio Dashboard under **🤖 Ask the Agents**, with a tab per agent (Risk / Wealth / Research / PM / CIO / Data). Each tab keeps its own history and is scoped to the active data dir (live vs demo). The dashboard goes through `src/services/agents.py`, which holds a process-local UUID-keyed session cache; agents are instantiated lazily on the first message.
 3. **HTTP** — `POST /agents/{kind}/sessions` opens a session, `POST /agents/sessions/{id}/messages` sends turns, `POST /agents/sessions/{id}/prime` loads past summaries as context, `DELETE /agents/sessions/{id}` ends. The `ANTHROPIC_API_KEY` stays server-side. See [`docs/api.md`](docs/api.md).
-4. **Programmatic** — `from src.agent import RiskAgent, WealthAgent, ResearchAgent, PortfolioManagerAgent, CIOAgent` (see end of file).
+4. **Programmatic** — `from src.agent import RiskAgent, WealthAgent, ResearchAgent, PortfolioManagerAgent, CIOAgent, DataAgent` (see end of file).
 
 All three read `ANTHROPIC_API_KEY` from the environment. The simplest way is a project-local `.env` file (auto-loaded via `src/env.py`):
 
@@ -321,6 +321,45 @@ uv run invest-monitor cio --portfolio "My Portfolio" --query "What's our biggest
 | `override_proposal(portfolio_name, original_allocation_json, override_allocation_json, total_amount, reason)` | Replace the PM's proposal with the CIO's version + concrete reason. |
 | `request_more_research(question, scope="general")` | Brief the Researcher with a specific question rather than a blanket rejection. |
 | `export_report(filename, markdown_content, overwrite=False)` | Persist a CIO decision memo as markdown under `<data_dir>/reports/`. |
+
+---
+
+## Data Agent
+
+`invest-monitor data` · `DataAgent` · 16 skills
+
+The only agent that **writes**. It finds and corrects bad data — positions, the security master, price history, and fund holdings — and is built so that a model can propose a fix but only you can commit it.
+
+**Every correction is a two-step.** A fix skill returns a diff and a `change_id` and writes nothing; `apply_change(change_id)` commits it, after backing up each affected file to `<data_dir>/.backups/<timestamp>/` and appending to `<data_dir>/audit_log.jsonl`. A change can only be applied once. Both paths are gitignored.
+
+**Position fixes are retroactive via the trade ledger.** `positions.parquet` stores only current state, so the agent corrects the dated trade behind a position and replays the ledger, leaving history truthful and the position derived. Positions with no trades at all (imported opening balances) are never touched by a replay — use `seed_opening_balance` to give one a dated opening trade.
+
+**`cost_basis` is per share.** The agent warns when a proposed cost basis moves by more than 10x, which is the signature of a total-vs-per-share mix-up.
+
+| Skill | What it does |
+|---|---|
+| `scan_data(portfolio_name="")` | Integrity scan across all four domains, worst-first, each with a suggested fix. Read-only. |
+| `list_price_gaps(ticker)` | Runs of missing business days in a ticker's stored history. |
+| `show_trades(portfolio_name="", ticker="", limit=25)` | The ledger, so a correction can cite a `trade_id`. |
+| `correct_trade(trade_id, ...)` | Fix a historical trade's price/quantity/date/side/ticker, then replay. |
+| `insert_trade(portfolio_name, ticker, side, quantity, trade_price, trade_date)` | Add a trade that happened but was never recorded, placed by date. |
+| `delete_trade(trade_id)` | Remove a duplicate or mis-entry, then replay. |
+| `seed_opening_balance(portfolio_name, ticker, quantity, cost_basis, as_of_date)` | Give an imported position a dated opening trade. `cost_basis` is per share. |
+| `replay_ledger(portfolio_name)` | Recompute positions from the ledger as-is; shows drift. |
+| `fix_security_master(ticker, ...)` | Patch named columns on one assets row. Validates `asset_type` against the enum. |
+| `fill_prices_forward(ticker, through_date="", max_run_days=30)` | Carry the last price across missing business days. Refuses runs over the cap. |
+| `correct_price(ticker, date, price)` | Fix or insert a single price point. |
+| `normalise_fund_weights(fund_ticker, as_of_date="")` | Rescale a holdings snapshot to sum to 1. |
+| `review_pending()` | Proposals awaiting approval. |
+| `apply_change(change_id)` / `discard_change(change_id)` | Commit or throw away a proposal. |
+| `show_audit_log(limit=10)` | What has already been applied, newest first. |
+
+Try:
+
+- *"Scan the database and tell me what's broken."*
+- *"Trade 41 was booked at 120.44 but the real price was 89.92."*
+- *"ARTY is missing three weeks of prices — fill them forward through Friday."*
+- *"CRST is tagged as a Stock but it's an ETF."*
 
 ---
 

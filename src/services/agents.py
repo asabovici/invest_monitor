@@ -22,6 +22,7 @@ from typing import Callable, Dict
 
 from src.agent import (
     CIOAgent,
+    DataAgent,
     PortfolioManagerAgent,
     ResearchAgent,
     RiskAgent,
@@ -46,6 +47,7 @@ _AGENT_CLASSES: Dict[str, Callable[..., object]] = {
     "research": ResearchAgent,
     "pm": PortfolioManagerAgent,
     "cio": CIOAgent,
+    "data": DataAgent,
 }
 
 

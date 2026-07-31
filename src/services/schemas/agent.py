@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-AgentKind = Literal["risk", "wealth", "research", "pm", "cio"]
+AgentKind = Literal["risk", "wealth", "research", "pm", "cio", "data"]
 
 
 class ChatSession(BaseModel):

@@ -2121,8 +2121,9 @@ if view == "Multi-Portfolio Dashboard":
         tab_research_chat,
         tab_pm_chat,
         tab_cio_chat,
+        tab_data_chat,
     ) = st.tabs([
-        "⚠️ Risk", "💰 Wealth", "🔬 Research", "💼 PM", "🎩 CIO",
+        "⚠️ Risk", "💰 Wealth", "🔬 Research", "💼 PM", "🎩 CIO", "🧹 Data",
     ])
     with tab_risk_chat:
         _render_agent_chat("risk", "Risk")
@@ -2134,6 +2135,12 @@ if view == "Multi-Portfolio Dashboard":
         _render_agent_chat("pm", "PM")
     with tab_cio_chat:
         _render_agent_chat("cio", "CIO")
+    with tab_data_chat:
+        st.caption(
+            "Corrects stored data. Every fix is previewed as a diff and only "
+            "written after you approve it; each apply takes a backup first."
+        )
+        _render_agent_chat("data", "Data")
 
     st.stop()
 
