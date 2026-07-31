@@ -2,10 +2,10 @@ import click
 from tabulate import tabulate
 
 from src import env as _env  # noqa: F401  — loads .env into os.environ
+# Database is still imported because the `production daemon` command
+# instantiates one for the long-running loop. Every other CLI command goes
+# through src.services.*.
 from src.database import Database
-from src.collector import Collector
-from src.data.ingestion import Ingester
-from src.reporting import ReportingEngine
 from src.agent import (
     CIOAgent,
     PortfolioManagerAgent,
@@ -23,26 +23,36 @@ def cli():
 @cli.command()
 @click.argument("csv_path")
 @click.option("--name", default="", help="Portfolio name (defaults to CSV filename)")
-def load(csv_path, name):
+@click.option("--data-dir", default="data", show_default=True)
+def load(csv_path, name, data_dir):
     """Load a portfolio from a CSV file and save it to the database."""
-    db = Database()
-    portfolio = Ingester(db).load_portfolio_from_csv(csv_path, name)
-    click.echo(f"Saved portfolio '{portfolio.name}' with {len(portfolio.positions)} positions.")
+    from pathlib import Path
+    from src.services.portfolios import load_portfolio_from_csv
+    resolved_name = name or Path(csv_path).stem
+    csv_text = Path(csv_path).read_text(encoding="utf-8")
+    detail = load_portfolio_from_csv(data_dir, resolved_name, csv_text)
+    click.echo(f"Saved portfolio '{detail.name}' with {len(detail.positions)} positions.")
 
 
 @cli.command()
 @click.option("--period", default="1y", help="Collection period (e.g. 1y, 1mo)")
 @click.option("--portfolio", "portfolio_name", default="", help="Collect only for a specific portfolio")
-def collect(period, portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def collect(period, portfolio_name, data_dir):
     """Fetch historical pricing for assets in the database."""
-    db = Database()
-    if portfolio_name:
-        portfolio = db.get_portfolio(portfolio_name)
-        tickers = [pos.asset.ticker for pos in portfolio.positions]
-        Collector(db).collect_prices(tickers, period=period)
-    else:
-        Collector(db).update_all_assets(period=period)
-    click.echo("Collection complete.")
+    from src.services.prices import collect_prices
+    try:
+        result = collect_prices(
+            data_dir, period=period, portfolio_name=portfolio_name or None,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Collection complete: {len(result.tickers_collected)} succeeded, "
+        f"{len(result.tickers_failed)} failed."
+    )
+    for ticker, reason in result.tickers_failed.items():
+        click.echo(f"  ! {ticker}: {reason}")
 
 
 @cli.group()
@@ -52,35 +62,42 @@ def portfolio():
 
 
 @portfolio.command("list")
-def portfolio_list():
+@click.option("--data-dir", default="data", show_default=True,
+              help="Data directory to read from (e.g. 'data' or 'data_demo').")
+def portfolio_list(data_dir):
     """List all saved portfolios."""
-    db = Database()
-    names = db.list_portfolios()
-    if not names:
+    from src.services.portfolios import list_portfolios
+    summaries = list_portfolios(data_dir)
+    if not summaries:
         click.echo("No portfolios saved yet.")
-    else:
-        for name in names:
-            click.echo(f"  {name}")
+        return
+    for s in summaries:
+        click.echo(f"  {s.name}  ({s.position_count} positions, total cost ${s.total_cost:,.2f})")
 
 
 @portfolio.command("create")
 @click.argument("name")
-def portfolio_create(name):
+@click.option("--data-dir", default="data", show_default=True)
+def portfolio_create(name, data_dir):
     """Create an empty portfolio. Add positions later via trades or CSV."""
-    from src.models import Portfolio
-    db = Database()
-    if name in db.list_portfolios():
-        raise click.ClickException(f"Portfolio '{name}' already exists.")
-    db.save_portfolio(Portfolio(name=name, positions=[]))
+    from src.services.portfolios import create_portfolio
+    try:
+        create_portfolio(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Created empty portfolio '{name}'.")
 
 
 @portfolio.command("delete")
 @click.argument("name")
-def portfolio_delete(name):
+@click.option("--data-dir", default="data", show_default=True)
+def portfolio_delete(name, data_dir):
     """Delete a saved portfolio."""
-    db = Database()
-    db.delete_portfolio(name)
+    from src.services.portfolios import delete_portfolio
+    try:
+        delete_portfolio(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Deleted portfolio '{name}'.")
 
 
@@ -117,49 +134,54 @@ def summaries():
 
 @summaries.command("list")
 @click.option("--agent", default=None,
-              help="Filter to one agent (risk / wealth / research).")
-def summaries_list(agent):
+              help="Filter to one agent (risk / wealth / research / pm / cio).")
+@click.option("--data-dir", default="data", show_default=True)
+def summaries_list(agent, data_dir):
     """Show all saved agent-conversation summaries, newest first."""
-    from src import agent_summaries
-    items = agent_summaries.list_summaries(agent=agent)
+    from src.services.summaries import list_summaries
+    items = list_summaries(data_dir, agent=agent)
     if not items:
         click.echo("No summaries stored." + (f" (filter: agent={agent})" if agent else ""))
         return
     rows = [{
-        "key":       s["key"],
-        "agent":     s["agent"],
-        "started":   s["started_at"],
-        "msgs":      s["message_count"],
-        "preview":   (s.get("summary") or "")[:60].replace("\n", " ") + "…",
+        "key":     s.key,
+        "agent":   s.agent,
+        "started": s.started_at,
+        "msgs":    s.message_count,
+        "preview": (s.summary or "")[:60].replace("\n", " ") + "…",
     } for s in items]
     click.echo(tabulate(rows, headers="keys", tablefmt="github"))
 
 
 @summaries.command("show")
 @click.argument("key")
-def summaries_show(key):
+@click.option("--data-dir", default="data", show_default=True)
+def summaries_show(key, data_dir):
     """Print one summary in full."""
-    from src import agent_summaries
-    s = agent_summaries.get_summary(key)
-    if s is None:
-        raise click.ClickException(f"No summary with key '{key}'.")
-    click.echo(f"agent      : {s['agent']}")
-    click.echo(f"started_at : {s['started_at']}")
-    click.echo(f"messages   : {s['message_count']}")
+    from src.services.summaries import get_summary
+    try:
+        s = get_summary(data_dir, key)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"agent      : {s.agent}")
+    click.echo(f"started_at : {s.started_at}")
+    click.echo(f"messages   : {s.message_count}")
     click.echo()
     click.echo("=== SUMMARY ===")
-    click.echo(s.get("summary") or "(empty)")
+    click.echo(s.summary or "(empty)")
 
 
 @summaries.command("delete")
 @click.argument("key")
-def summaries_delete(key):
+@click.option("--data-dir", default="data", show_default=True)
+def summaries_delete(key, data_dir):
     """Delete a stored summary."""
-    from src import agent_summaries
-    if agent_summaries.delete_summary(key):
-        click.echo(f"Deleted '{key}'.")
-    else:
-        raise click.ClickException(f"No summary with key '{key}'.")
+    from src.services.summaries import delete_summary
+    try:
+        delete_summary(data_dir, key)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Deleted '{key}'.")
 
 
 @cli.group()
@@ -169,69 +191,85 @@ def group():
 
 
 @group.command("list")
-def group_list():
+@click.option("--data-dir", default="data", show_default=True)
+def group_list(data_dir):
     """List all groups + their members."""
-    db = Database()
-    names = db.list_groups()
-    if not names:
+    from src.services.groups import list_groups
+    infos = list_groups(data_dir)
+    if not infos:
         click.echo("No groups defined.")
         return
-    for name in names:
-        members = db.get_group_members(name)
-        desc = db.get_group_description(name) or ""
-        click.echo(f"\n{name}" + (f"  — {desc}" if desc else ""))
-        click.echo(f"  Members ({len(members)}): {', '.join(members) if members else '—'}")
+    for info in infos:
+        click.echo(f"\n{info.name}" + (f"  — {info.description}" if info.description else ""))
+        members = info.members
+        click.echo(f"  Members ({info.member_count}): {', '.join(members) if members else '—'}")
 
 
 @group.command("create")
 @click.argument("name")
 @click.option("--description", default="", help="Optional description for the group.")
-def group_create(name, description):
+@click.option("--data-dir", default="data", show_default=True)
+def group_create(name, description, data_dir):
     """Create (or update the description of) a group."""
-    db = Database()
-    db.create_group(name, description=description)
+    from src.services.groups import create_group
+    try:
+        create_group(data_dir, name, description=description)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Group '{name}' ready.")
 
 
 @group.command("add")
 @click.argument("group_name")
 @click.argument("portfolio_name")
-def group_add(group_name, portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_add(group_name, portfolio_name, data_dir):
     """Add a portfolio to a group."""
-    db = Database()
-    if group_name not in db.list_groups():
-        raise click.ClickException(f"Group '{group_name}' does not exist. Create it first.")
-    if portfolio_name not in db.list_portfolios():
-        raise click.ClickException(f"Portfolio '{portfolio_name}' does not exist.")
-    db.add_to_group(group_name, portfolio_name)
+    from src.services.groups import add_to_group
+    try:
+        add_to_group(data_dir, group_name, portfolio_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Added '{portfolio_name}' to '{group_name}'.")
 
 
 @group.command("remove")
 @click.argument("group_name")
 @click.argument("portfolio_name")
-def group_remove(group_name, portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_remove(group_name, portfolio_name, data_dir):
     """Remove a portfolio from a group."""
-    db = Database()
-    db.remove_from_group(group_name, portfolio_name)
+    from src.services.groups import remove_from_group
+    try:
+        remove_from_group(data_dir, group_name, portfolio_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Removed '{portfolio_name}' from '{group_name}'.")
 
 
 @group.command("delete")
 @click.argument("name")
-def group_delete(name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_delete(name, data_dir):
     """Delete a group and clear all its memberships (portfolios are untouched)."""
-    db = Database()
-    db.delete_group(name)
+    from src.services.groups import delete_group
+    try:
+        delete_group(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Deleted group '{name}'.")
 
 
 @group.command("show")
 @click.argument("portfolio_name")
-def group_show(portfolio_name):
+@click.option("--data-dir", default="data", show_default=True)
+def group_show(portfolio_name, data_dir):
     """Show which groups a portfolio belongs to."""
-    db = Database()
-    groups = db.get_groups_for_portfolio(portfolio_name)
+    from src.services.groups import get_groups_for_portfolio
+    try:
+        groups = get_groups_for_portfolio(data_dir, portfolio_name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     if not groups:
         click.echo(f"'{portfolio_name}' is not in any group.")
     else:
@@ -258,15 +296,20 @@ def benchmarks_list():
 @benchmarks.command("fetch")
 @click.option("--period", default="10y",
               help="yfinance period to pull for each proxy (default 10y).")
-def benchmarks_fetch(period):
+@click.option("--data-dir", default="data", show_default=True)
+def benchmarks_fetch(period, data_dir):
     """Pull price history for every benchmark proxy via yfinance."""
     from src.benchmarks import all_proxy_tickers
-    from src.collector import Collector
-    db = Database()
+    from src.services.prices import collect_prices
     tickers = all_proxy_tickers()
     click.echo(f"Fetching prices for {len(tickers)} proxy tickers: {', '.join(tickers)}")
-    Collector(db).collect_prices(tickers, period=period)
-    click.echo("Done.")
+    result = collect_prices(data_dir, period=period, tickers=tickers)
+    click.echo(
+        f"Done. Collected {len(result.tickers_collected)}, "
+        f"failed {len(result.tickers_failed)}."
+    )
+    for t, reason in result.tickers_failed.items():
+        click.echo(f"  ! {t}: {reason}")
 
 
 @cli.group()
@@ -282,55 +325,52 @@ def production():
 
 
 @production.command("status")
-def production_status():
+@click.option("--data-dir", default="data", show_default=True)
+def production_status(data_dir):
     """Show each job's last run, status, and whether it's due."""
-    import pandas as pd
-    from src.production import JobRunner
-    runner = JobRunner(Database())
-    jobs = runner.db.get_production_jobs().sort_values("job_name")
-    now = pd.Timestamp.now()
+    from src.services.production import list_jobs
     rows = []
-    for _, r in jobs.iterrows():
-        last_run = r["last_run_at"]
+    for j in list_jobs(data_dir):
         rows.append({
-            "job":         r["job_name"],
-            "enabled":     "yes" if bool(r["enabled"]) else "no",
-            "interval_h":  round(int(r["interval_minutes"]) / 60, 1),
-            "last_run":    last_run.strftime("%Y-%m-%d %H:%M") if pd.notna(last_run) else "—",
-            "last_status": r["last_status"] or "—",
-            "due":         "yes" if runner.is_due(r, now=now) else "no",
+            "job":         j.job_name,
+            "enabled":     "yes" if j.enabled else "no",
+            "interval_h":  round(j.interval_minutes / 60, 1),
+            "last_run":    j.last_run_at.strftime("%Y-%m-%d %H:%M") if j.last_run_at else "—",
+            "last_status": j.last_status or "—",
+            "due":         "yes" if j.is_due else "no",
         })
     click.echo(tabulate(rows, headers="keys", tablefmt="github"))
 
 
 @production.command("run")
-def production_run():
+@click.option("--data-dir", default="data", show_default=True)
+def production_run(data_dir):
     """Run every job that's currently due. Cron-friendly one-shot."""
-    from src.production import JobRunner
-    runner = JobRunner(Database())
-    results = runner.run_due_jobs()
-    if not results:
+    from src.services.production import run_due_jobs
+    resp = run_due_jobs(data_dir)
+    if not resp.results:
         click.echo("No jobs were due.")
         return
-    for r in results:
-        click.echo(f"[{r['status']:7}] {r['job_name']:24}  {r.get('duration_seconds', 0):.2f}s"
-                   + (f"  — {r.get('error')}" if r['status'] == 'error' else ""))
+    for r in resp.results:
+        click.echo(
+            f"[{r.status:7}] {r.job_name:24}  {r.duration_seconds:.2f}s"
+            + (f"  — {r.error}" if r.status == "error" else "")
+        )
 
 
 @production.command("run-now")
 @click.argument("job_name")
-def production_run_now(job_name):
+@click.option("--data-dir", default="data", show_default=True)
+def production_run_now(job_name, data_dir):
     """Force-run one job ignoring schedule + enabled flag."""
-    from src.production import JobRunner, JOB_REGISTRY
-    if job_name not in JOB_REGISTRY:
-        raise click.ClickException(
-            f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
-        )
-    runner = JobRunner(Database())
-    r = runner.run_job(job_name, force=True)
+    from src.services.production import run_job
+    try:
+        r = run_job(data_dir, job_name, force=True)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(
-        f"[{r['status']}] {job_name}  {r.get('duration_seconds', 0):.2f}s"
-        + (f"\n{r.get('error')}" if r['status'] == 'error' else "")
+        f"[{r.status}] {job_name}  {r.duration_seconds:.2f}s"
+        + (f"\n{r.error}" if r.status == "error" else "")
     )
 
 
@@ -383,11 +423,11 @@ def schedule_install(job_name, interval):
             f"Unknown job '{job_name}'. Known: {', '.join(JOB_REGISTRY)}"
         )
     if interval is None:
-        db = Database()
-        jobs = db.get_production_jobs()
-        match = jobs[jobs["job_name"] == job_name] if not jobs.empty else None
-        interval = int(match["interval_minutes"].iloc[0]) if match is not None and not match.empty \
-                   else int(JOB_REGISTRY[job_name]["interval_minutes"])
+        from src.services.production import get_job
+        try:
+            interval = int(get_job("data", job_name).interval_minutes)
+        except ValueError:
+            interval = int(JOB_REGISTRY[job_name]["interval_minutes"])
     res = _sched.install(job_name, interval)
     if not res["ok"]:
         raise click.ClickException(res["detail"])
@@ -411,41 +451,56 @@ def schedule_uninstall(job_name):
 @click.option("--from", "start_date", default=None,
               help="Recompute from this date onward (YYYY-MM-DD).")
 @click.option("--full", is_flag=True, help="Recompute the full history (ignore incremental).")
-def metrics_refresh(portfolio_name, start_date, full):
+@click.option("--data-dir", default="data", show_default=True)
+def metrics_refresh(portfolio_name, start_date, full, data_dir):
     """Compute daily security / portfolio / attribution metrics and save to parquet."""
-    from src.attribution import AttributionEngine
-    db = Database()
-    summary = AttributionEngine(db).refresh_all(
-        start_date=start_date, portfolio_name=portfolio_name, full=full,
-    )
+    from src.services.production import refresh_metrics
+    from src.services.schemas.production import MetricsRefreshRequest
+    summary = refresh_metrics(
+        data_dir,
+        MetricsRefreshRequest(portfolio_name=portfolio_name, start_date=start_date, full=full),
+    ).summary
     click.echo(
-        f"Refreshed metrics — security: {summary['security_rows']} rows, "
-        f"portfolio: {summary['portfolio_rows']} rows, "
-        f"attribution: {summary['attribution_rows']} rows "
-        f"(portfolios: {', '.join(summary['portfolios'])})"
+        f"Refreshed metrics — security: {summary.get('security_rows', 0)} rows, "
+        f"portfolio: {summary.get('portfolio_rows', 0)} rows, "
+        f"attribution: {summary.get('attribution_rows', 0)} rows "
+        f"(portfolios: {', '.join(summary.get('portfolios') or [])})"
     )
 
 
 @cli.command()
 @click.argument("name")
-def report(name):
+@click.option("--data-dir", default="data", show_default=True)
+def report(name, data_dir):
     """Generate risk and exposure reports for a saved portfolio."""
-    db = Database()
-    portfolio = db.get_portfolio(name)
-    engine = ReportingEngine(db)
+    from src.services.reports import (
+        covariance_to_dataframe,
+        exposure as service_exposure,
+        risk_metrics as service_risk_metrics,
+    )
 
-    click.echo(f"\n--- {portfolio.name} — Exposure Report ---")
-    exposure = engine.get_portfolio_exposure(portfolio)
-    click.echo(tabulate(exposure, headers="keys", tablefmt="grid"))
+    try:
+        exposure_report = service_exposure(data_dir, name)
+        risk_report = service_risk_metrics(data_dir, name)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
-    click.echo(f"\n--- {portfolio.name} — Risk Metrics ---")
-    metrics = engine.get_portfolio_risk_metrics(portfolio)
-    for k, v in metrics.items():
-        if k == "Covariance Matrix":
-            click.echo(f"\n{k}:")
-            click.echo(tabulate(v, headers="keys", tablefmt="grid"))
-        else:
-            click.echo(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
+    click.echo(f"\n--- {exposure_report.portfolio_name} — Exposure Report ---")
+    exposure_rows = [
+        {"asset_type": r.asset_type, "sector": r.sector or "—",
+         "market_value": round(r.market_value, 2), "weight_pct": round(r.weight_pct, 2)}
+        for r in exposure_report.rows
+    ]
+    click.echo(tabulate(exposure_rows, headers="keys", tablefmt="grid"))
+
+    click.echo(f"\n--- {risk_report.portfolio_name} — Risk Metrics ---")
+    click.echo(f"Volatility: {risk_report.annualised_volatility:.4f}")
+    click.echo(f"Historical VaR (95%): {risk_report.historical_var_95:.4f}")
+    click.echo(f"Monte Carlo VaR (95%): {risk_report.monte_carlo_var_95:.4f}")
+    cov_df = covariance_to_dataframe(risk_report)
+    if not cov_df.empty:
+        click.echo("\nCovariance Matrix:")
+        click.echo(tabulate(cov_df, headers="keys", tablefmt="grid"))
 
 
 @cli.command()
@@ -590,6 +645,28 @@ def cio(portfolio_name, query):
         click.echo(agent_instance.run_query(full_query))
     else:
         agent_instance.run_interactive(initial_portfolio=portfolio_name)
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Interface to bind. Use 0.0.0.0 to listen on all interfaces.")
+@click.option("--port", default=8000, type=int, show_default=True)
+@click.option("--data-dir", default=None,
+              help="Set INVEST_MONITOR_DATA_DIR for the server process. "
+                   "Per-request X-Data-Dir headers still override.")
+@click.option("--reload", is_flag=True, help="Enable uvicorn auto-reload (development).")
+def serve(host, port, data_dir, reload):
+    """Run the invest-monitor HTTP API (FastAPI + uvicorn).
+
+    All read/write traffic from future frontends goes through this server.
+    Streamlit can also call into the same service layer in-process — it
+    does not need this server to be running.
+    """
+    import os
+    import uvicorn
+    if data_dir:
+        os.environ["INVEST_MONITOR_DATA_DIR"] = data_dir
+    uvicorn.run("src.api.main:app", host=host, port=port, reload=reload)
 
 
 if __name__ == "__main__":

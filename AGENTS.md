@@ -15,10 +15,11 @@ The rest of this document covers the conversational agents.
 
 The five conversational agents are all powered by **Claude Opus 4.6 with adaptive thinking** and the Anthropic beta tool runner. Each agent maintains multi-turn conversation history so follow-up questions work without repeating context.
 
-You can talk to them three ways:
-1. **CLI** — `invest-monitor agent`, `invest-monitor wealth`, `invest-monitor research`, `invest-monitor pm`, `invest-monitor cio`.
-2. **Streamlit dashboard** — embedded chat panel at the bottom of the Multi-Portfolio Dashboard under **🤖 Ask the Agents**, with a tab per agent (Risk / Wealth / Research / PM / CIO). Each tab keeps its own history and is scoped to the active data dir (live vs demo).
-3. **Programmatic** — `from src.agent import RiskAgent, WealthAgent, ResearchAgent, PortfolioManagerAgent, CIOAgent` (see end of file).
+You can talk to them four ways:
+1. **CLI** — `invest-monitor agent`, `invest-monitor wealth`, `invest-monitor research`, `invest-monitor pm`, `invest-monitor cio`. The CLI instantiates the agent class directly and drives an interactive REPL.
+2. **Streamlit dashboard** — embedded chat panel at the bottom of the Multi-Portfolio Dashboard under **🤖 Ask the Agents**, with a tab per agent (Risk / Wealth / Research / PM / CIO). Each tab keeps its own history and is scoped to the active data dir (live vs demo). The dashboard goes through `src/services/agents.py`, which holds a process-local UUID-keyed session cache; agents are instantiated lazily on the first message.
+3. **HTTP** — `POST /agents/{kind}/sessions` opens a session, `POST /agents/sessions/{id}/messages` sends turns, `POST /agents/sessions/{id}/prime` loads past summaries as context, `DELETE /agents/sessions/{id}` ends. The `ANTHROPIC_API_KEY` stays server-side. See [`docs/api.md`](docs/api.md).
+4. **Programmatic** — `from src.agent import RiskAgent, WealthAgent, ResearchAgent, PortfolioManagerAgent, CIOAgent` (see end of file).
 
 All three read `ANTHROPIC_API_KEY` from the environment. The simplest way is a project-local `.env` file (auto-loaded via `src/env.py`):
 

@@ -1,6 +1,8 @@
 # Invest Monitor
 
-A personal investment portfolio monitoring tool with risk analytics, ETF lookthrough, daily performance attribution, a Streamlit dashboard, and three Claude-powered agents.
+A personal investment portfolio monitoring tool with risk analytics, ETF lookthrough, daily performance attribution, a Streamlit dashboard, five Claude-powered agents, and a FastAPI HTTP surface.
+
+> **Architecture.** Business logic lives in `src/services/` (pure-Python, typed). The Streamlit dashboard, the Click CLI, and the FastAPI app at `src/api/` all call into the same service layer. External clients consume `/openapi.json`; Streamlit + CLI run in-process for zero serialisation overhead. Full design rationale in [`API_REFACTOR_PLAN.md`](API_REFACTOR_PLAN.md).
 
 ## Features
 
@@ -20,6 +22,7 @@ A personal investment portfolio monitoring tool with risk analytics, ETF lookthr
 - **Streamlit dashboard** — interactive UI across nine tabs per portfolio plus a multi-portfolio dashboard with embedded **agent chat**
 - **AI agents** — five conversational agents powered by Claude: Risk, Wealth, Research, Portfolio Manager, and CIO. PM builds defensible trade proposals (BUY/SELL orders with dollar amounts and share counts, sector-tilt projections); CIO reviews them and produces a structured approve / override / more-research decision. All reachable from the CLI **or directly from the dashboard tabs**. Conversations can be summarised (via Haiku) and stored in `agent_summaries.json`, then loaded as priming context into future chats — even across different agents. **Wealth, PM, and CIO can also export markdown reports** via an `export_report` skill — files land in `<data_dir>/reports/`, scoped to the active dataset
 - **Multi-agent coordination graph** — a LangGraph pipeline (Researcher → Portfolio Manager → Risk Manager → CIO) sharing a single `TradingState`, with a bounded PM ↔ Risk revision loop, `MemorySaver` checkpointing, and an optional human-in-the-loop pause before the CIO signs off. Currently runs end-to-end on deterministic stub nodes; the PM and CIO conversational agents are the human-facing counterparts. See [`docs/multi-agent-graph.md`](docs/multi-agent-graph.md)
+- **HTTP API** — typed FastAPI surface (`src/api/`) in front of every service. `invest-monitor serve` boots uvicorn at `127.0.0.1:8000`; Swagger UI at `/docs`, schema at `/openapi.json`. Opt-in hardening via three env vars: `INVEST_MONITOR_API_KEY` (Bearer / X-API-Key auth, constant-time compare), `INVEST_MONITOR_ALLOWED_DATA_DIRS` (X-Data-Dir allowlist), `INVEST_MONITOR_RATE_LIMIT` (token-bucket throttle on the long-running endpoints). See [`docs/api.md`](docs/api.md).
 
 ## Project Structure
 
@@ -61,8 +64,30 @@ invest_monitor/
 │   │   ├── graph.py           # build_graph() — StateGraph + MemorySaver
 │   │   ├── run.py             # CLI smoke entrypoint
 │   │   └── nodes/             # researcher, portfolio_manager, risk_manager, cio
-│   ├── app.py             # Streamlit dashboard
-│   └── cli.py             # Click CLI entry point
+│   ├── services/              # Pure-Python service layer (no UI/HTTP imports)
+│   │   ├── _db.py             # @lru_cache-backed Database accessor
+│   │   ├── portfolios.py      # list/get/create/delete/load-csv/update-positions
+│   │   ├── prices.py          # latest/history/collect
+│   │   ├── reports.py         # risk/exposure/income/correlation/attribution
+│   │   ├── scenarios.py       # catalogues + sector stress
+│   │   ├── benchmarks.py      # catalogue + returns/stats/compare-to-portfolio
+│   │   ├── groups.py          # CRUD + atomic membership replace
+│   │   ├── trades.py          # list / record_trade
+│   │   ├── agents.py          # server-side chat sessions
+│   │   ├── summaries.py       # save/load conversation summaries
+│   │   ├── trading_graph.py   # start_run / get / resume / end
+│   │   ├── production.py      # job list / run / runs / metrics-refresh
+│   │   └── schemas/           # Canonical pydantic models
+│   ├── api/                   # FastAPI app (only place that knows HTTP)
+│   │   ├── main.py            # app = FastAPI(...) + mounts
+│   │   ├── deps.py            # X-Data-Dir + allowlist
+│   │   ├── errors.py          # Global ValueError → HTTP handler
+│   │   ├── middleware.py      # Body-size cap
+│   │   ├── auth.py            # Opt-in API-key middleware
+│   │   ├── rate_limit.py      # Opt-in token-bucket rate limit
+│   │   └── routers/           # One file per resource
+│   ├── app.py             # Streamlit dashboard (calls services)
+│   └── cli.py             # Click CLI entry point (calls services; `serve` boots FastAPI)
 ├── data/                  # gitignored — live dataset
 └── data_demo/             # gitignored — demo dataset (separate from live)
     ├── assets.parquet                  # ticker, name, asset_type, currency, sector,

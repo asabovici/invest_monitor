@@ -14,13 +14,51 @@ from src.data.ingestion import Ingester
 from src.database.database import Database
 from src.models import Asset, AssetType, Portfolio, Position
 from src.reporting import ReportingEngine
-from src.agent import (
-    CIOAgent,
-    PortfolioManagerAgent,
-    ResearchAgent,
-    RiskAgent,
-    WealthAgent,
+from src.services.portfolios import (
+    create_portfolio as service_create_portfolio,
+    delete_portfolio as service_delete_portfolio,
+    list_portfolio_names,
+    load_portfolio_from_csv as service_load_csv,
+    update_positions as service_update_positions,
 )
+from src.services.prices import (
+    collect_prices as service_collect_prices,
+    get_latest_prices as service_get_latest_prices,
+    get_price_history as service_get_price_history,
+    price_history_to_dataframe,
+)
+from src.services.reports import (
+    covariance_to_dataframe,
+    income_projection as service_income_projection,
+    income_report_to_dataframe,
+    risk_metrics as service_risk_metrics,
+)
+from src.services.scenarios import (
+    run_sector_stress as service_run_sector_stress,
+    stress_result_to_dataframe,
+)
+from src.services.benchmarks import (
+    benchmark_returns as service_benchmark_returns,
+    benchmark_stats as service_benchmark_stats,
+    list_benchmarks as service_list_benchmarks,
+)
+from src.services.groups import (
+    create_group as service_create_group,
+    delete_group as service_delete_group,
+    get_groups_for_portfolio as service_get_groups_for_portfolio,
+    list_groups as service_list_groups,
+    set_group_members as service_set_group_members,
+    set_groups_for_portfolio as service_set_groups_for_portfolio,
+)
+from src.services.trades import (
+    list_trades as service_list_trades,
+    record_trade as service_record_trade,
+)
+from src.services.schemas.portfolio import PositionInput
+from src.services.schemas.trade import RecordTradeRequest
+# The dashboard now talks to chat agents through ``src.services.agents`` so
+# the Anthropic client lives on the server side. Agent classes themselves
+# are still importable from ``src.agent`` for CLI and programmatic use.
 from src import demo as demo_data
 
 st.set_page_config(
@@ -38,6 +76,24 @@ def _active_data_dir() -> str:
     return demo_data.DEMO_DATA_DIR if st.session_state.get("demo_mode") else LIVE_DATA_DIR
 
 
+# ── Domain-layer escape hatches ─────────────────────────────────────────────
+#
+# Streamlit code goes through ``src.services`` for everything that has a
+# service today. The two accessors below are the last documented escape
+# hatches for paths that haven't been migrated yet:
+#
+#   * ``db.get_portfolio(name)`` — domain Portfolio used by lookthrough,
+#     metrics, agent inputs. Migrating means rewriting consumers that
+#     expect the rich domain object.
+#   * ``db.get_sector_betas`` / ``list_sector_beta_dates`` / fund profile
+#     reads (Security Master, Lookthrough, Fund Holdings tabs).
+#   * Reporting's ad-hoc ``calculate_returns`` / ``calculate_cumulative_returns``
+#     for the chart panels.
+#
+# The ratchet lint in ``tests/test_lint_domain_layering.py`` counts direct
+# domain-class references in this file and prevents NEW ones — clean up by
+# building a service and dropping the count.
+
 @st.cache_resource
 def _make_db(data_dir: str) -> Database:
     return Database(data_dir)
@@ -49,27 +105,26 @@ def _make_reporting(data_dir: str) -> ReportingEngine:
 
 
 def get_db() -> Database:
+    """Cached Database for the active data dir. Escape-hatch only — see comment above."""
     return _make_db(_active_data_dir())
 
 
 def get_reporting() -> ReportingEngine:
+    """Cached ReportingEngine for the active data dir. Escape-hatch only — see comment above."""
     return _make_reporting(_active_data_dir())
 
 
 def load_portfolio_from_upload(uploaded_file, portfolio_name: str) -> Portfolio:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        tmp_path = tmp.name
-    try:
-        portfolio = Ingester(get_db()).load_portfolio_from_csv(tmp_path, portfolio_name)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-    return portfolio
+    csv_text = uploaded_file.getbuffer().tobytes().decode("utf-8", errors="replace")
+    service_load_csv(_active_data_dir(), portfolio_name, csv_text)
+    # Return the domain Portfolio for downstream code that expects it.
+    return get_db().get_portfolio(portfolio_name)
 
 
 @st.cache_data(ttl=300)
 def _fetch_prices_cached(data_dir: str, tickers: tuple[str, ...]) -> pd.DataFrame:
-    return _make_db(data_dir).get_historical_prices(list(tickers))
+    history = service_get_price_history(data_dir, list(tickers))
+    return price_history_to_dataframe(history)
 
 
 def fetch_prices(tickers: tuple[str, ...]) -> pd.DataFrame:
@@ -77,10 +132,10 @@ def fetch_prices(tickers: tuple[str, ...]) -> pd.DataFrame:
 
 
 def latest_prices(tickers: list[str]) -> dict[str, float]:
-    df = fetch_prices(tuple(tickers))
-    if df.empty:
+    if not tickers:
         return {}
-    return df.iloc[-1].to_dict()
+    response = service_get_latest_prices(_active_data_dir(), tickers)
+    return {t: v for t, v in response.prices.items() if v is not None}
 
 
 def fmt_usd(v) -> str:
@@ -285,7 +340,7 @@ def compute_portfolio_metrics(portfolio: Portfolio) -> dict | None:
     starts.
     """
     tickers = [pos.asset.ticker for pos in portfolio.positions]
-    prices = get_db().get_historical_prices(tickers)
+    prices = fetch_prices(tuple(tickers))
     if prices.empty:
         return None
 
@@ -423,7 +478,7 @@ with st.sidebar:
     st.markdown("---")
 
     # Portfolio selector (saved portfolios)
-    saved = get_db().list_portfolios()
+    saved = list_portfolio_names(_active_data_dir())
     if saved:
         selected_name = st.selectbox("Select portfolio", options=saved)
         if st.button("Open", type="primary"):
@@ -451,21 +506,22 @@ with st.sidebar:
             nm = new_pf_name.strip()
             if not nm:
                 st.error("Name is required.")
-            elif nm in get_db().list_portfolios():
-                st.error(f"Portfolio '{nm}' already exists.")
             else:
-                empty = Portfolio(name=nm, positions=[])
-                get_db().save_portfolio(empty)
-                st.session_state["portfolio"] = empty
-                st.success(f"Created '{nm}'. Add positions in the Trade Blotter tab.")
-                st.rerun()
+                try:
+                    service_create_portfolio(_active_data_dir(), nm)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state["portfolio"] = get_db().get_portfolio(nm)
+                    st.success(f"Created '{nm}'. Add positions in the Trade Blotter tab.")
+                    st.rerun()
 
     # Portfolio groups — tag portfolios so they can be filtered together on
     # the Multi-Portfolio Dashboard (e.g. Taxable, Tax-Free, Retirement).
     with st.expander("🏷 Portfolio Groups"):
-        _gdb = get_db()
-        _all_pfs = _gdb.list_portfolios()
-        existing_groups = _gdb.list_groups()
+        _all_pfs = list_portfolio_names(_active_data_dir())
+        existing_group_infos = service_list_groups(_active_data_dir())
+        existing_groups = [g.name for g in existing_group_infos]
 
         # Create a new group
         st.markdown("**Create / update**")
@@ -482,9 +538,13 @@ with st.sidebar:
             if not nm:
                 st.error("Group name is required.")
             else:
-                _gdb.create_group(nm, description=new_g_desc.strip())
-                st.success(f"Group '{nm}' saved. Add members below.")
-                st.rerun()
+                try:
+                    service_create_group(_active_data_dir(), nm, description=new_g_desc.strip())
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.success(f"Group '{nm}' saved. Add members below.")
+                    st.rerun()
 
         if existing_groups:
             st.markdown("---")
@@ -492,7 +552,11 @@ with st.sidebar:
             sel_group = st.selectbox(
                 "Select group", existing_groups, key="group_manage_select",
             )
-            current_members = _gdb.get_group_members(sel_group)
+            sel_info = next(
+                (g for g in existing_group_infos if g.name == sel_group),
+                None,
+            )
+            current_members = sel_info.members if sel_info else []
             new_members = st.multiselect(
                 "Members", _all_pfs, default=current_members,
                 key=f"group_members_{sel_group}",
@@ -500,17 +564,25 @@ with st.sidebar:
             col_save, col_del = st.columns(2)
             with col_save:
                 if st.button("Save members", key=f"group_save_{sel_group}"):
-                    _gdb.set_group_members(sel_group, new_members)
-                    st.success(
-                        f"Group '{sel_group}' has {len(new_members)} portfolio(s)."
-                    )
-                    st.rerun()
+                    try:
+                        service_set_group_members(_active_data_dir(), sel_group, new_members)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(
+                            f"Group '{sel_group}' has {len(new_members)} portfolio(s)."
+                        )
+                        st.rerun()
             with col_del:
                 if st.button("Delete group", key=f"group_del_{sel_group}",
                              type="secondary"):
-                    _gdb.delete_group(sel_group)
-                    st.success(f"Deleted group '{sel_group}'.")
-                    st.rerun()
+                    try:
+                        service_delete_group(_active_data_dir(), sel_group)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(f"Deleted group '{sel_group}'.")
+                        st.rerun()
         else:
             st.caption("No groups yet. Create one above to start filtering the dashboard.")
 
@@ -520,15 +592,19 @@ with st.sidebar:
         key="sidebar_refresh_metrics_btn",
         help="Recompute the daily returns/risk/attribution time series for every portfolio.",
     ):
-        from src.attribution import AttributionEngine
+        from src.services.production import refresh_metrics
+        from src.services.schemas.production import MetricsRefreshRequest
         with st.spinner("Computing daily metrics…"):
-            summary = AttributionEngine(get_db()).refresh_all()
+            summary = refresh_metrics(
+                _active_data_dir(), MetricsRefreshRequest(),
+            ).summary
         modes = summary.get("modes", {})
         v2 = [n for n, m in modes.items() if m == "trade_replay"]
         v1 = [n for n, m in modes.items() if m == "static_current"]
         msg = (
-            f"Refreshed metrics — sec: {summary['security_rows']}, "
-            f"port: {summary['portfolio_rows']}, attr: {summary['attribution_rows']}"
+            f"Refreshed metrics — sec: {summary.get('security_rows', 0)}, "
+            f"port: {summary.get('portfolio_rows', 0)}, "
+            f"attr: {summary.get('attribution_rows', 0)}"
         )
         if v2 or v1:
             msg += f"\n\nMode used: trade replay → {', '.join(v2) or '—'}; static current → {', '.join(v1) or '—'}"
@@ -536,7 +612,10 @@ with st.sidebar:
 
     if "portfolio" in st.session_state:
         p: Portfolio = st.session_state["portfolio"]
-        _active_groups = get_db().get_groups_for_portfolio(p.name)
+        try:
+            _active_groups = service_get_groups_for_portfolio(_active_data_dir(), p.name)
+        except ValueError:
+            _active_groups = []
         st.markdown(
             f"**Active:** {p.name} ({len(p.positions)} positions)"
             + (f"  \n🏷 {', '.join(_active_groups)}" if _active_groups else "")
@@ -546,15 +625,25 @@ with st.sidebar:
         period = st.selectbox("Price history period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
         if st.button("Collect Prices"):
             with st.spinner("Fetching from yfinance…"):
-                Collector(get_db()).update_all_assets(period=period)
+                result = service_collect_prices(_active_data_dir(), period=period)
                 _fetch_prices_cached.clear()
-            st.success("Prices updated!")
+            if result.tickers_failed:
+                st.warning(
+                    f"Collected {len(result.tickers_collected)} ticker(s); "
+                    f"{len(result.tickers_failed)} failed."
+                )
+            else:
+                st.success(f"Prices updated for {len(result.tickers_collected)} ticker(s)!")
 
         st.markdown("---")
         if st.button("Delete portfolio", type="secondary"):
-            get_db().delete_portfolio(p.name)
-            del st.session_state["portfolio"]
-            st.rerun()
+            try:
+                service_delete_portfolio(_active_data_dir(), p.name)
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                del st.session_state["portfolio"]
+                st.rerun()
 
     st.markdown("---")
     st.caption("CSV columns: Ticker, Name, Type, Quantity, CostBasis, [Currency, Sector]")
@@ -564,7 +653,7 @@ with st.sidebar:
 if view == "Multi-Portfolio Dashboard":
     st.title("Multi-Portfolio Dashboard")
 
-    all_portfolio_names = get_db().list_portfolios()
+    all_portfolio_names = list_portfolio_names(_active_data_dir())
     if not all_portfolio_names:
         st.info("No portfolios found. Import a portfolio CSV in the sidebar.")
         st.stop()
@@ -574,7 +663,7 @@ if view == "Multi-Portfolio Dashboard":
     # single group (e.g. "Taxable" or "Tax-Free"). "All portfolios" is the
     # default and matches pre-groups behaviour. Filtering portfolio_names here
     # cascades to every downstream section since they all derive from it.
-    _all_groups = get_db().list_groups()
+    _all_groups = [g.name for g in service_list_groups(_active_data_dir())]
     # Default: not in combined mode. Flipped on below when the user picks a
     # group AND toggles "View as combined portfolio".
     combined_view = False
@@ -596,7 +685,11 @@ if view == "Multi-Portfolio Dashboard":
                 ),
             )
         if group_choice != ALL_OPTION:
-            members = set(get_db().get_group_members(group_choice))
+            _group_info = next(
+                (g for g in service_list_groups(_active_data_dir()) if g.name == group_choice),
+                None,
+            )
+            members = set(_group_info.members) if _group_info else set()
             portfolio_names = [p for p in all_portfolio_names if p in members]
             if not portfolio_names:
                 st.warning(
@@ -615,7 +708,7 @@ if view == "Multi-Portfolio Dashboard":
                         "Useful for comparing the whole group against benchmarks."
                     ),
                 )
-            desc = get_db().get_group_description(group_choice)
+            desc = _group_info.description if _group_info else ""
             st.caption(
                 f"Showing **{group_choice}** ({len(portfolio_names)} of "
                 f"{len(all_portfolio_names)} portfolios)"
@@ -952,15 +1045,17 @@ if view == "Multi-Portfolio Dashboard":
         "(Stock/ETF/Fund). Driven by **income_rate** in the Security Master."
     )
 
-    _reporting = get_reporting()
     all_income_rows = []
     income_by_portfolio = {}
     for pname, p in portfolios_by_name.items():
-        df_inc = _reporting.compute_portfolio_income(p, latest_prices=latest)
+        income_report = service_income_projection(
+            _active_data_dir(), pname, latest_prices=latest,
+        )
+        df_inc = income_report_to_dataframe(income_report)
         if not df_inc.empty:
             df_inc.insert(0, "Portfolio", pname)
             all_income_rows.append(df_inc)
-            income_by_portfolio[pname] = float(df_inc["Annual Income"].sum())
+            income_by_portfolio[pname] = income_report.total_annual_income
 
     if all_income_rows:
         income_df = pd.concat(all_income_rows, ignore_index=True)
@@ -1131,13 +1226,13 @@ if view == "Multi-Portfolio Dashboard":
             .transform(lambda s: (1.0 + s.fillna(0.0)).cumprod() - 1.0)
         )
 
-        # Benchmark overlay selection
-        from src.benchmarks import (
-            BENCHMARKS, benchmark_daily_returns, benchmark_stats,
-        )
+        # Benchmark overlay selection — catalogue comes from the service so the
+        # UI stays in sync with whatever the API exposes.
+        _bench_catalogue = service_list_benchmarks()
+        _bench_proxy_counts = {b.name: len(b.weights) for b in _bench_catalogue}
         selected_benchmarks = st.multiselect(
             "Overlay benchmarks",
-            options=list(BENCHMARKS.keys()),
+            options=[b.name for b in _bench_catalogue],
             default=[],
             key="attr_bench_select",
             help=(
@@ -1161,13 +1256,15 @@ if view == "Multi-Portfolio Dashboard":
             # same window start so directly comparable to the portfolio lines.
             cutoff_str = cutoff.strftime("%Y-%m-%d")
             for bname in selected_benchmarks:
-                b = BENCHMARKS[bname]
-                daily_b = benchmark_daily_returns(b, _attr_db, start_date=cutoff_str)
-                if daily_b.empty:
+                bench_series = service_benchmark_returns(
+                    _active_data_dir(), bname, start=cutoff_str,
+                )
+                if not bench_series.dates:
                     continue
-                cum_b = (1.0 + daily_b).cumprod() - 1.0
                 fig_ret.add_trace(go.Scatter(
-                    x=cum_b.index, y=cum_b.values, mode="lines",
+                    x=list(bench_series.dates),
+                    y=list(bench_series.cumulative_returns),
+                    mode="lines",
                     name=f"{bname} (benchmark)",
                     line=dict(dash="dash", width=2),
                 ))
@@ -1201,16 +1298,18 @@ if view == "Multi-Portfolio Dashboard":
         if selected_benchmarks:
             bench_rows = []
             for bname in selected_benchmarks:
-                stats_b = benchmark_stats(BENCHMARKS[bname], _attr_db, start_date=cutoff_str)
-                pr = stats_b.get("period_return")
-                vol = stats_b.get("vol_annualised")
-                mdd = stats_b.get("max_drawdown")
+                stats_b = service_benchmark_stats(
+                    _active_data_dir(), bname, start=cutoff_str,
+                )
+                pr = stats_b.period_return
+                vol = stats_b.vol_annualised
+                mdd = stats_b.max_drawdown
                 bench_rows.append({
                     "Benchmark": bname,
                     "Period Return": f"{pr:+.2%}" if pr is not None else "—",
                     "Annualised Vol": f"{vol*100:.2f}%" if vol is not None else "—",
                     "Max Drawdown (window)": f"{mdd*100:.2f}%" if mdd is not None else "—",
-                    "# Proxies": len(BENCHMARKS[bname].proxies),
+                    "# Proxies": _bench_proxy_counts.get(bname, 0),
                 })
             st.markdown("**Benchmark stats over the same window**")
             st.dataframe(pd.DataFrame(bench_rows), use_container_width=True, hide_index=True)
@@ -1218,9 +1317,9 @@ if view == "Multi-Portfolio Dashboard":
             # vs-benchmark delta: portfolio period return minus the first
             # selected benchmark's period return. Quick "did I beat it" read.
             primary_bench = selected_benchmarks[0]
-            primary_pr = benchmark_stats(
-                BENCHMARKS[primary_bench], _attr_db, start_date=cutoff_str,
-            ).get("period_return")
+            primary_pr = service_benchmark_stats(
+                _active_data_dir(), primary_bench, start=cutoff_str,
+            ).period_return
             if primary_pr is not None:
                 delta_rows = []
                 for r in end_kpi_rows:
@@ -1886,29 +1985,46 @@ if view == "Multi-Portfolio Dashboard":
         "in the CLI. Each tab keeps its own conversation history."
     )
 
-    def _render_agent_chat(agent_key: str, agent_cls, label: str):
-        # Scope the agent instance to the active data dir so the demo-mode
-        # toggle gives each mode its own agent + history.
-        from src import agent_summaries
+    def _render_agent_chat(agent_kind: str, label: str):
+        """Chat tab UI. Sessions live in ``services.agents``; we only store
+        the ``session_id`` in ``st.session_state``."""
+        from src.services import agents as agents_service
+        from src.services import summaries as summaries_service
+        from src.services.schemas.summary import SummaryInfo
+
         active_dir = _active_data_dir()
-        state_key = f"agent_{agent_key}_{active_dir}"
-        msgs_key  = f"agent_{agent_key}_{active_dir}_msgs"
+        session_key = f"agent_session_{agent_kind}_{active_dir}"
+        msgs_key    = f"agent_{agent_kind}_{active_dir}_msgs"
 
         if msgs_key not in st.session_state:
             st.session_state[msgs_key] = []
 
-        # ── Load past summaries as context (any agent's past convo can prime any agent) ──
-        existing_summaries = agent_summaries.list_summaries(data_dir=active_dir)
+        def _ensure_session() -> str | None:
+            """Create the service-side chat session lazily. Returns the id."""
+            if session_key not in st.session_state:
+                try:
+                    info = agents_service.start_chat(agent_kind, active_dir)
+                except Exception as exc:
+                    st.error(
+                        f"Could not start the {label} agent: {exc}. "
+                        "Make sure `ANTHROPIC_API_KEY` is set."
+                    )
+                    return None
+                st.session_state[session_key] = info.session_id
+            return st.session_state[session_key]
+
+        # ── Load past summaries as context ───────────────────────────────────
+        existing_summaries: list[SummaryInfo] = summaries_service.list_summaries(active_dir)
         if existing_summaries:
             with st.expander(
                 f"📂 Load past conversation context ({len(existing_summaries)} saved)",
                 expanded=False,
             ):
                 opt_map = {
-                    s["key"]: (
-                        f"[{s['agent']}] {s['started_at']}  ·  "
-                        f"{s['message_count']} msgs  ·  "
-                        f"{(s.get('summary') or '')[:80].strip()}…"
+                    s.key: (
+                        f"[{s.agent}] {s.started_at}  ·  "
+                        f"{s.message_count} msgs  ·  "
+                        f"{(s.summary or '')[:80].strip()}…"
                     )
                     for s in existing_summaries
                 }
@@ -1916,35 +2032,25 @@ if view == "Multi-Portfolio Dashboard":
                     "Pick conversations to prime this chat with",
                     options=list(opt_map.keys()),
                     format_func=lambda k: opt_map[k],
-                    key=f"load_ctx_{agent_key}_{active_dir}",
+                    key=f"load_ctx_{agent_kind}_{active_dir}",
                 )
                 if st.button(
                     "Load context",
-                    key=f"load_ctx_btn_{agent_key}_{active_dir}",
+                    key=f"load_ctx_btn_{agent_kind}_{active_dir}",
                     disabled=not picked_keys,
                 ):
-                    selected = [agent_summaries.get_summary(k, data_dir=active_dir)
-                                for k in picked_keys]
-                    selected = [s for s in selected if s]
-                    primer = agent_summaries.build_context_prompt(selected)
-                    # Lazy-init agent for the priming round-trip
-                    if state_key not in st.session_state:
-                        try:
-                            st.session_state[state_key] = agent_cls(data_dir=active_dir)
-                        except Exception as exc:
-                            st.error(
-                                f"Could not start the {label} agent: {exc}. "
-                                "Make sure `ANTHROPIC_API_KEY` is set."
-                            )
-                            return
+                    session_id = _ensure_session()
+                    if session_id is None:
+                        return
                     label_text = (
-                        f"_📂 Loaded context from {len(selected)} past "
-                        f"conversation(s): {', '.join(s['key'] for s in selected)}_"
+                        f"_📂 Loaded context from {len(picked_keys)} past "
+                        f"conversation(s): {', '.join(picked_keys)}_"
                     )
                     st.session_state[msgs_key].append({"role": "user", "content": label_text})
                     with st.spinner(f"Priming {label} agent with past context…"):
                         try:
-                            ack = st.session_state[state_key].chat(primer)
+                            reply = agents_service.prime_chat(session_id, list(picked_keys))
+                            ack = reply.reply
                         except Exception as exc:
                             ack = f"⚠️ Agent error while loading context: {exc}"
                     st.session_state[msgs_key].append({"role": "assistant", "content": ack})
@@ -1955,57 +2061,44 @@ if view == "Multi-Portfolio Dashboard":
                 st.markdown(msg["content"])
 
         prompt = st.chat_input(
-            f"Ask the {label} agent…", key=f"input_{agent_key}",
+            f"Ask the {label} agent…", key=f"input_{agent_kind}",
         )
 
-        # Action buttons row: Clear + Save summary
         col_clear, col_save = st.columns(2)
         with col_clear:
-            if st.button("Clear conversation", key=f"clear_{agent_key}"):
-                st.session_state.pop(state_key, None)
+            if st.button("Clear conversation", key=f"clear_{agent_kind}"):
+                # Drop the cached session so the next message gets a fresh one.
+                old_sid = st.session_state.pop(session_key, None)
+                if old_sid:
+                    try:
+                        agents_service.end_chat(old_sid)
+                    except ValueError:
+                        pass
                 st.session_state[msgs_key] = []
                 st.rerun()
         with col_save:
-            can_save = bool(st.session_state[msgs_key])
+            can_save = bool(st.session_state[msgs_key]) and session_key in st.session_state
             if st.button(
-                "💾 Save summary", key=f"save_summary_{agent_key}_{active_dir}",
+                "💾 Save summary", key=f"save_summary_{agent_kind}_{active_dir}",
                 disabled=not can_save,
                 help="Compress this conversation via Claude Haiku and store it "
                      "in agent_summaries.json so you can reload it later.",
             ):
                 try:
                     with st.spinner("Summarising conversation…"):
-                        # Use the agent's Anthropic client when available to
-                        # avoid double-instantiating Anthropic().
-                        client = (
-                            st.session_state[state_key].client
-                            if state_key in st.session_state else None
+                        detail = summaries_service.save_summary_from_session(
+                            active_dir, st.session_state[session_key],
                         )
-                        key, entry = agent_summaries.save_summary(
-                            agent=agent_key,
-                            messages=st.session_state[msgs_key],
-                            client=client,
-                            data_dir=active_dir,
-                        )
-                    st.success(f"Saved as `{key}`")
+                    st.success(f"Saved as `{detail.key}`")
                     with st.expander("Summary preview", expanded=True):
-                        st.markdown(entry["summary"])
+                        st.markdown(detail.summary)
                 except Exception as exc:
                     st.error(f"Could not save summary: {exc}")
 
         if prompt:
-            # Lazy-init the agent only when the user actually sends a message,
-            # so a missing ANTHROPIC_API_KEY doesn't break the whole dashboard.
-            if state_key not in st.session_state:
-                try:
-                    st.session_state[state_key] = agent_cls(data_dir=active_dir)
-                except Exception as exc:
-                    with st.chat_message("assistant"):
-                        st.error(
-                            f"Could not start the {label} agent: {exc}.\n\n"
-                            "Make sure `ANTHROPIC_API_KEY` is set in your environment."
-                        )
-                    return
+            session_id = _ensure_session()
+            if session_id is None:
+                return
 
             st.session_state[msgs_key].append({"role": "user", "content": prompt})
             with st.chat_message("user"):
@@ -2014,7 +2107,8 @@ if view == "Multi-Portfolio Dashboard":
             with st.chat_message("assistant"):
                 with st.spinner(f"{label} agent thinking…"):
                     try:
-                        reply = st.session_state[state_key].chat(prompt)
+                        reply_obj = agents_service.chat_message(session_id, prompt)
+                        reply = reply_obj.reply
                     except Exception as exc:
                         reply = f"⚠️ Agent error: {exc}"
                 st.markdown(reply)
@@ -2031,22 +2125,28 @@ if view == "Multi-Portfolio Dashboard":
         "⚠️ Risk", "💰 Wealth", "🔬 Research", "💼 PM", "🎩 CIO",
     ])
     with tab_risk_chat:
-        _render_agent_chat("risk", RiskAgent, "Risk")
+        _render_agent_chat("risk", "Risk")
     with tab_wealth_chat:
-        _render_agent_chat("wealth", WealthAgent, "Wealth")
+        _render_agent_chat("wealth", "Wealth")
     with tab_research_chat:
-        _render_agent_chat("research", ResearchAgent, "Research")
+        _render_agent_chat("research", "Research")
     with tab_pm_chat:
-        _render_agent_chat("pm", PortfolioManagerAgent, "PM")
+        _render_agent_chat("pm", "PM")
     with tab_cio_chat:
-        _render_agent_chat("cio", CIOAgent, "CIO")
+        _render_agent_chat("cio", "CIO")
 
     st.stop()
 
 # ── Production view ───────────────────────────────────────────────────────────
 
 if view == "⚙️ Production":
-    from src.production import JobRunner, JOB_REGISTRY
+    from src.services.production import (
+        list_jobs as service_list_jobs,
+        list_runs as service_list_runs,
+        run_due_jobs as service_run_due_jobs,
+        run_job as service_run_job,
+        set_job_enabled as service_set_job_enabled,
+    )
     st.title("⚙️ Analytics Production")
     st.caption(
         "Scheduled jobs that keep the analytics fresh: price collection, "
@@ -2055,17 +2155,25 @@ if view == "⚙️ Production":
         "into cron / systemd for true automation."
     )
 
-    _prod_db = get_db()
-    _runner = JobRunner(_prod_db)
-    jobs_df = _prod_db.get_production_jobs()
-    now = pd.Timestamp.now()
-    if not jobs_df.empty:
-        jobs_df = jobs_df.sort_values("job_name").reset_index(drop=True)
+    _job_statuses = service_list_jobs(_active_data_dir())
+    # Rebuild a DataFrame for the existing chart/table layout — service is the
+    # source of truth, pandas just convenient for the downstream rendering.
+    jobs_df = pd.DataFrame([{
+        "job_name":              j.job_name,
+        "enabled":               j.enabled,
+        "interval_minutes":      j.interval_minutes,
+        "last_run_at":           j.last_run_at,
+        "last_status":           j.last_status,
+        "last_error":            j.last_error,
+        "last_duration_seconds": j.last_duration_seconds,
+        "is_due":                j.is_due,
+        "description":           j.description,
+    } for j in _job_statuses])
 
     # ── KPI strip ─────────────────────────────────────────────────────────────
     n_jobs   = len(jobs_df)
     n_failed = int((jobs_df["last_status"] == "error").sum()) if n_jobs else 0
-    n_due    = sum(_runner.is_due(r, now=now) for _, r in jobs_df.iterrows()) if n_jobs else 0
+    n_due    = int(jobs_df["is_due"].sum()) if n_jobs else 0
 
     k1, k2, k3 = st.columns(3)
     k1.metric("Jobs",            n_jobs)
@@ -2082,15 +2190,14 @@ if view == "⚙️ Production":
     with col_a:
         if st.button("Run all due now", type="primary", key="prod_run_due_btn"):
             with st.spinner("Running due jobs…"):
-                results = _runner.run_due_jobs()
-            if not results:
+                resp = service_run_due_jobs(_active_data_dir())
+            if not resp.results:
                 st.info("No jobs were due.")
             else:
-                for r in results:
-                    icon = "✅" if r["status"] == "success" else "❌" if r["status"] == "error" else "⏭️"
-                    st.write(f"{icon} **{r['job_name']}** — {r['status']} "
-                             f"({r.get('duration_seconds', 0):.1f}s)"
-                             + (f"  \n`{r.get('error', '')}`" if r['status'] == 'error' else ""))
+                for r in resp.results:
+                    icon = "✅" if r.status == "success" else "❌" if r.status == "error" else "⏭️"
+                    st.write(f"{icon} **{r.job_name}** — {r.status} ({r.duration_seconds:.1f}s)"
+                             + (f"  \n`{r.error}`" if r.status == "error" else ""))
             st.rerun()
     with col_b:
         st.caption(
@@ -2105,7 +2212,7 @@ if view == "⚙️ Production":
     else:
         for _, r in jobs_df.iterrows():
             jname = r["job_name"]
-            desc  = JOB_REGISTRY.get(jname, {}).get("description", "")
+            desc  = r.get("description") or ""
             interval_h = round(int(r["interval_minutes"]) / 60, 1) if r["interval_minutes"] else 0
             last_run = r["last_run_at"]
             last_run_str = last_run.strftime("%Y-%m-%d %H:%M") if pd.notna(last_run) else "—"
@@ -2113,7 +2220,7 @@ if view == "⚙️ Production":
                 "success":   "✅", "error":     "❌",
                 "never_run": "⏸️",  "running":   "⏳",
             }.get(r["last_status"], "❔")
-            due_icon = "🔔" if _runner.is_due(r, now=now) else "  "
+            due_icon = "🔔" if bool(r["is_due"]) else "  "
 
             with st.container(border=True):
                 row_cols = st.columns([3, 2, 2, 2, 1, 1])
@@ -2136,17 +2243,26 @@ if view == "⚙️ Production":
                         label_visibility="collapsed",
                     )
                     if enabled != bool(r["enabled"]):
-                        _prod_db.upsert_production_job(jname, enabled=enabled)
-                        st.rerun()
+                        try:
+                            service_set_job_enabled(_active_data_dir(), jname, enabled)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.rerun()
                 with row_cols[5]:
                     if st.button("Run", key=f"prod_run_{jname}"):
                         with st.spinner(f"Running {jname}…"):
-                            result = _runner.run_job(jname, force=True)
-                        if result["status"] == "success":
-                            st.toast(f"✅ {jname} succeeded ({result.get('duration_seconds', 0):.1f}s)")
-                        elif result["status"] == "error":
-                            st.toast(f"❌ {jname} failed: {result.get('error')}", icon="🚨")
-                        st.rerun()
+                            try:
+                                result = service_run_job(_active_data_dir(), jname, force=True)
+                            except ValueError as exc:
+                                st.error(str(exc))
+                                result = None
+                        if result is not None:
+                            if result.status == "success":
+                                st.toast(f"✅ {jname} succeeded ({result.duration_seconds:.1f}s)")
+                            elif result.status == "error":
+                                st.toast(f"❌ {jname} failed: {result.error}", icon="🚨")
+                            st.rerun()
                 if r["last_status"] == "error" and r["last_error"]:
                     st.error(f"`{r['last_error']}`")
 
@@ -2213,7 +2329,16 @@ if view == "⚙️ Production":
     # ── Run log + Issues tabs ─────────────────────────────────────────────────
     st.markdown("---")
     tab_recent, tab_issues = st.tabs(["📜 Recent Runs", "🚨 Issues"])
-    runs_df = _prod_db.get_production_runs(limit=200)
+    _run_records = service_list_runs(_active_data_dir(), limit=200)
+    runs_df = pd.DataFrame([{
+        "job_name":         r.job_name,
+        "started_at":       r.started_at,
+        "ended_at":         r.ended_at,
+        "status":           r.status,
+        "duration_seconds": r.duration_seconds,
+        "error_message":    r.error_message,
+        "details":          r.details,
+    } for r in _run_records])
 
     def _fmt_runs(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
@@ -2282,10 +2407,12 @@ with tab_overview:
     cur_prices = latest_prices(tickers)
 
     # ── Quick-edit group memberships ───────────────────────────────────────────
-    _ov_db = get_db()
-    _ov_all_groups = _ov_db.list_groups()
+    _ov_all_groups = [g.name for g in service_list_groups(_active_data_dir())]
     if _ov_all_groups:
-        _ov_current = _ov_db.get_groups_for_portfolio(portfolio.name)
+        try:
+            _ov_current = service_get_groups_for_portfolio(_active_data_dir(), portfolio.name)
+        except ValueError:
+            _ov_current = []
         col_g, col_save = st.columns([5, 1])
         with col_g:
             _ov_picked = st.multiselect(
@@ -2304,11 +2431,15 @@ with tab_overview:
             st.write("")  # vertical alignment with the multiselect
             if set(_ov_picked) != set(_ov_current):
                 if st.button("Save groups", key="overview_save_groups", type="primary"):
-                    _ov_db.set_groups_for_portfolio(portfolio.name, _ov_picked)
-                    st.success(
-                        f"Groups for **{portfolio.name}**: "
-                        f"{', '.join(_ov_picked) if _ov_picked else '— none —'}"
-                    )
+                    try:
+                        service_set_groups_for_portfolio(_active_data_dir(), portfolio.name, _ov_picked)
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success(
+                            f"Groups for **{portfolio.name}**: "
+                            f"{', '.join(_ov_picked) if _ov_picked else '— none —'}"
+                        )
                     st.rerun()
     else:
         st.caption(
@@ -2575,13 +2706,13 @@ with tab_risk:
         st.warning("No price data found. Use **Collect Prices** in the sidebar first.")
     elif portfolio.positions and not prices_df_risk.empty:
         try:
-            metrics = reporting.get_portfolio_risk_metrics(portfolio)
-            cov_matrix: pd.DataFrame = metrics.pop("Covariance Matrix")
+            risk_report = service_risk_metrics(_active_data_dir(), portfolio.name)
+            cov_matrix: pd.DataFrame = covariance_to_dataframe(risk_report)
 
             m1, m2, m3 = st.columns(3)
-            m1.metric("Annualised Volatility", fmt_pct(metrics["Volatility"] * 100))
-            m2.metric("Historical VaR (95%, 1d)", fmt_pct(metrics["Historical VaR (95%)"] * 100))
-            m3.metric("Monte Carlo VaR (95%, 1d)", fmt_pct(metrics["Monte Carlo VaR (95%)"] * 100))
+            m1.metric("Annualised Volatility", fmt_pct(risk_report.annualised_volatility * 100))
+            m2.metric("Historical VaR (95%, 1d)", fmt_pct(risk_report.historical_var_95 * 100))
+            m3.metric("Monte Carlo VaR (95%, 1d)", fmt_pct(risk_report.monte_carlo_var_95 * 100))
 
             st.markdown("---")
 
@@ -2611,7 +2742,7 @@ with tab_risk:
                 weights /= weights.sum()
                 port_returns = reporting.calculate_returns(tickers).dot(weights)
 
-                hist_var = metrics["Historical VaR (95%)"]
+                hist_var = risk_report.historical_var_95
                 fig_dist = go.Figure()
                 fig_dist.add_trace(go.Histogram(
                     x=port_returns,
@@ -2699,12 +2830,21 @@ with tab_risk:
             with col_re:
                 st.write("")  # vertical alignment with the inputs above
                 if st.button("Refresh betas", key="refresh_sector_betas_btn"):
+                    # Route through the production-jobs service so the same
+                    # logic runs whether the user clicks here or kicks the
+                    # scheduled "refresh_sector_betas" job.
+                    from src.services.production import run_job as service_run_job
                     try:
                         with st.spinner("Fetching 20y of SPDR sector ETFs from yfinance…"):
-                            new_betas = Collector.fetch_sector_betas(years=20)
-                            get_db().save_sector_betas(new_betas)
-                        st.success(f"Computed {len(new_betas)} pairwise betas (20y window).")
-                        st.rerun()
+                            result = service_run_job(
+                                _active_data_dir(), "refresh_sector_betas", force=True,
+                            )
+                        if result.status == "success":
+                            rows = (result.details or {}).get("betas_rows", "?")
+                            st.success(f"Computed {rows} pairwise betas (20y window).")
+                            st.rerun()
+                        else:
+                            st.error(f"Could not refresh betas: {result.error}")
                     except Exception as exc:
                         st.error(f"Could not refresh betas: {exc}")
 
@@ -2773,9 +2913,14 @@ with tab_risk:
                         key=f"stress_other_{scenario_name}_{at}",
                     ) / 100.0
 
-        stress_df = reporting.compute_sector_stress(
-            portfolio, sector_shocks, non_equity_shocks, latest_prices=cur_prices,
+        stress_result = service_run_sector_stress(
+            _active_data_dir(),
+            portfolio.name,
+            custom_sector_shocks=sector_shocks,
+            custom_non_equity_shocks=non_equity_shocks,
+            latest_prices=cur_prices,
         )
+        stress_df = stress_result_to_dataframe(stress_result)
 
         if not stress_df.empty:
             total_base = float(stress_df["Base Value"].sum())
@@ -2818,7 +2963,10 @@ with tab_income:
     if not portfolio.positions:
         st.info("No positions yet. Add some via the **📋 Trades** tab.")
     else:
-        inc_df = reporting.compute_portfolio_income(portfolio, latest_prices=cur_prices)
+        income_report = service_income_projection(
+            _active_data_dir(), portfolio.name, latest_prices=cur_prices,
+        )
+        inc_df = income_report_to_dataframe(income_report)
         base_total   = float(inc_df["Base Value"].sum()) if not inc_df.empty else 0.0
         annual_total = float(inc_df["Annual Income"].sum()) if not inc_df.empty else 0.0
         yield_pct    = (annual_total / base_total * 100.0) if base_total else 0.0
@@ -2933,15 +3081,28 @@ with tab_positions:
 
     if st.button("Save Position Changes", type="primary", key="save_pos"):
         keep = edited_pos[~edited_pos["Delete"]]
-        new_rows = [
-            {"ticker": r["Ticker"], "quantity": r["Quantity"], "cost_basis": r["Cost Basis (per share)"]}
-            for _, r in keep.iterrows()
-            if r["Quantity"] > 0
-        ]
-        db.update_positions_direct(portfolio.name, new_rows)
+        # Preserve each ticker's existing asset metadata — the editor only
+        # changes quantity and cost basis, never asset type / sector / name.
+        existing_assets = {pos.asset.ticker: pos.asset for pos in portfolio.positions}
+        position_inputs = []
+        for _, r in keep.iterrows():
+            if r["Quantity"] <= 0:
+                continue
+            ticker = r["Ticker"]
+            existing = existing_assets.get(ticker)
+            position_inputs.append(PositionInput(
+                ticker=ticker,
+                quantity=float(r["Quantity"]),
+                cost_basis_per_share=float(r["Cost Basis (per share)"]),
+                asset_type=existing.asset_type.value if existing else "Stock",
+                name=existing.name if existing else ticker,
+                sector=existing.sector if existing else None,
+                currency=existing.currency if existing else "USD",
+            ))
+        service_update_positions(_active_data_dir(), portfolio.name, position_inputs)
         st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
         deleted = edited_pos[edited_pos["Delete"]]["Ticker"].tolist()
-        msg = f"Saved. {len(new_rows)} position(s) kept."
+        msg = f"Saved. {len(position_inputs)} position(s) kept."
         if deleted:
             msg += f" Removed: {', '.join(deleted)}."
         st.success(msg)
@@ -2983,7 +3144,7 @@ with tab_positions:
                     # if the ticker already has a position)
                     db._apply_trade_to_positions(portfolio.name, new_ticker, "BUY", new_qty, new_cost)
                     # Ensure portfolio record exists
-                    if portfolio.name not in db.list_portfolios():
+                    if portfolio.name not in list_portfolio_names(_active_data_dir()):
                         db.save_portfolio(portfolio)
                     st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
                     st.success(f"Added {new_ticker} × {new_qty} @ {new_cost:.4f}")
@@ -3107,7 +3268,7 @@ with tab_trades:
             with col_t1:
                 t_portfolio = st.selectbox(
                     "Portfolio *",
-                    options=db.list_portfolios() or [portfolio.name],
+                    options=list_portfolio_names(_active_data_dir()) or [portfolio.name],
                     index=0,
                 )
                 t_ticker = st.text_input("Ticker *", placeholder="e.g. AAPL").strip().upper()
@@ -3137,35 +3298,59 @@ with tab_trades:
                     st.info(f"{t_ticker} was not in the security master — added with default type Stock. Update it in the Security Master tab.")
 
                 # Ensure portfolio record exists
-                if t_portfolio not in db.list_portfolios():
+                if t_portfolio not in list_portfolio_names(_active_data_dir()):
                     st.error(f"Portfolio '{t_portfolio}' not found.")
                 else:
-                    db.record_trade(
-                        portfolio_name=t_portfolio,
-                        ticker=t_ticker,
-                        side=t_side,
-                        quantity=t_quantity,
-                        trade_price=t_price,
-                        trade_date=str(t_date),
-                    )
-                    # Refresh active portfolio if it's the one we traded in
-                    if t_portfolio == portfolio.name:
-                        st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
+                    try:
+                        service_record_trade(
+                            _active_data_dir(),
+                            RecordTradeRequest(
+                                portfolio_name=t_portfolio,
+                                ticker=t_ticker,
+                                side=t_side,
+                                quantity=t_quantity,
+                                trade_price=t_price,
+                                trade_date=t_date,
+                            ),
+                        )
+                    except ValueError as exc:
+                        st.error(str(exc))
+                    else:
+                        # Refresh active portfolio if it's the one we traded in
+                        if t_portfolio == portfolio.name:
+                            st.session_state["portfolio"] = db.get_portfolio(portfolio.name)
 
-                    notional = t_quantity * t_price
-                    st.success(
-                        f"{'Bought' if t_side == 'BUY' else 'Sold'} {t_quantity:,.4f} × "
-                        f"{t_ticker} @ ${t_price:,.4f} = ${notional:,.2f} "
-                        f"in '{t_portfolio}' on {t_date}."
-                    )
-                    st.rerun()
+                        notional = t_quantity * t_price
+                        st.success(
+                            f"{'Bought' if t_side == 'BUY' else 'Sold'} {t_quantity:,.4f} × "
+                            f"{t_ticker} @ ${t_price:,.4f} = ${notional:,.2f} "
+                            f"in '{t_portfolio}' on {t_date}."
+                        )
+                        st.rerun()
 
     st.markdown("---")
 
     # ── Trade history ─────────────────────────────────────────────────────────
     st.subheader("Trade History")
     show_all = st.checkbox("Show all portfolios", value=False)
-    trades_df = db.list_trades(None if show_all else portfolio.name)
+    _trade_list = service_list_trades(
+        _active_data_dir(), portfolio_name=None if show_all else portfolio.name,
+    )
+    trades_df = pd.DataFrame([
+        {
+            "trade_id": t.trade_id,
+            "portfolio_name": t.portfolio_name,
+            "ticker": t.ticker,
+            "side": t.side,
+            "quantity": t.quantity,
+            "trade_price": t.trade_price,
+            "trade_date": t.trade_date,
+        }
+        for t in _trade_list.trades
+    ]) if _trade_list.trades else pd.DataFrame(columns=[
+        "trade_id", "portfolio_name", "ticker", "side",
+        "quantity", "trade_price", "trade_date",
+    ])
 
     if trades_df.empty:
         st.info("No trades recorded yet.")
