@@ -371,18 +371,27 @@ class AttributionEngine:
     ) -> dict:
         """Compute and persist daily metrics for all (or one) portfolio.
 
-        If `full` is False (default), only recomputes dates after the latest
-        already-stored date — strict incremental. `full=True` recomputes the
-        whole history (useful after schema changes or trade backfills).
-        """
-        # Decide start_date for security metrics
-        sec_start = start_date
-        if not full and sec_start is None:
-            last = self.db.latest_security_metric_date()
-            if last is not None:
-                sec_start = (last - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+        Every series is recomputed from inception and written as a whole.
+        ``start_date`` and ``full`` no longer truncate the computation
+        window, and are kept only so existing callers and the
+        ``/production/metrics-refresh`` body stay valid.
 
-        sec_df = self.compute_security_metrics(start_date=sec_start)
+        **Why the incremental mode was removed.** These frames carry
+        ``cum_return``, ``drawdown`` and ``max_drawdown``, which are
+        compounded from the first date of whatever window produced them.
+        Recomputing a trailing slice restarts that compound at zero, and
+        the stored series then holds rows based on two different
+        baselines. Observed on live data: an incremental refresh reported
+        SCHAB at -1.18% when the portfolio had returned +46.77%. A partial
+        recompute of a path-dependent series is never valid, so the option
+        to do one is gone rather than merely defaulted off.
+
+        Recomputing everything is affordable here — a few seconds across
+        every portfolio and roughly 1,400 trading days.
+        """
+        # Path-dependent columns are only correct when compounded from the
+        # first date the series exists, so the window is always the lot.
+        sec_df = self.compute_security_metrics(start_date=None)
         self.db.save_daily_security_metrics(sec_df)
 
         port_total = 0
@@ -395,11 +404,7 @@ class AttributionEngine:
             except Exception:
                 continue
 
-            port_start = start_date
-            if not full and port_start is None:
-                last = self.db.latest_portfolio_metric_date(name)
-                if last is not None:
-                    port_start = (last - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+            port_start = None  # see the docstring: always from inception
 
             # Prefer trade-replay (v2) when trades exist; else fall back to v1.
             has_trades = not self.db.list_trades(portfolio_name=name).empty

@@ -58,6 +58,20 @@ on first call via `_init_store`):
   this is why "list_portfolios newest-first" becomes "most recently
   edited first" in practice. Live with this until we add a separate
   `updated_at`.
+- **Path-dependent series are replaced whole, never upserted.**
+  `daily_portfolio_metrics`, `daily_attribution` and
+  `daily_security_metrics` carry running figures (`cum_return`,
+  `drawdown`, `max_drawdown`) that are only meaningful relative to the
+  first date of the window that produced them. Their writers use
+  `_replace_parquet` (scoped by `portfolio_name` / `ticker`), not
+  `_upsert_parquet`. Merging them per-date leaves one series holding rows
+  compounded from two different baselines — the stored file then reports
+  a confidently wrong total with no error anywhere. This was live: an
+  incremental refresh had SCHAB at -1.18% when it had returned +46.77%.
+  `AttributionEngine.refresh_all` therefore always recomputes from
+  inception; its `start_date` and `full` arguments no longer truncate the
+  window. If you add another column that accumulates, it belongs in a
+  replace-scoped frame too.
 - **Trade ledger is append-only.** Trades never get deleted. The
   positions table is *derived* from the ledger by `record_trade`'s
   applier — never edit positions directly when trades exist for the

@@ -579,10 +579,34 @@ class Database:
             existing = existing[~old_keys.isin(new_keys)]
         pd.concat([existing, df], ignore_index=True).to_parquet(path, index=False)
 
+    @staticmethod
+    def _replace_parquet(path: str, df: pd.DataFrame, scope_cols: List[str]) -> None:
+        """Replace every stored row whose scope appears in ``df``.
+
+        Use this instead of ``_upsert_parquet`` for frames carrying
+        path-dependent columns — a running compound like ``cum_return`` or
+        ``max_drawdown`` is only meaningful relative to the start of the
+        series it was computed over. Merging such a column per-date leaves
+        rows compounded from different baselines in one series, which
+        silently reports a wrong total. Replacing by scope keeps each
+        series whole and single-baselined.
+
+        No-op when ``df`` is empty, so a failed recompute cannot delete a
+        portfolio's stored history.
+        """
+        if df is None or df.empty:
+            return
+        existing = pd.read_parquet(path)
+        if not existing.empty:
+            new_scopes = pd.MultiIndex.from_frame(df[scope_cols].drop_duplicates())
+            old_scopes = pd.MultiIndex.from_frame(existing[scope_cols])
+            existing = existing[~old_scopes.isin(new_scopes)]
+        pd.concat([existing, df], ignore_index=True).to_parquet(path, index=False)
+
     def save_daily_security_metrics(self, df: pd.DataFrame) -> None:
-        """Upsert daily per-ticker metrics keyed on (date, ticker)."""
-        self._upsert_parquet(
-            self._daily_security_metrics_path(), df, ["date", "ticker"],
+        """Replace each ticker's whole series (it carries ``cum_return``)."""
+        self._replace_parquet(
+            self._daily_security_metrics_path(), df, ["ticker"],
         )
 
     def get_daily_security_metrics(
@@ -603,9 +627,13 @@ class Database:
         return pd.to_datetime(df["date"]).max()
 
     def save_daily_portfolio_metrics(self, df: pd.DataFrame) -> None:
-        """Upsert daily per-portfolio metrics keyed on (date, portfolio_name)."""
-        self._upsert_parquet(
-            self._daily_portfolio_metrics_path(), df, ["date", "portfolio_name"],
+        """Replace each portfolio's whole series.
+
+        Carries ``cum_return``, ``drawdown`` and ``max_drawdown``, all
+        path-dependent — see :meth:`_replace_parquet`.
+        """
+        self._replace_parquet(
+            self._daily_portfolio_metrics_path(), df, ["portfolio_name"],
         )
 
     def get_daily_portfolio_metrics(
@@ -626,9 +654,15 @@ class Database:
         return pd.to_datetime(df["date"]).max()
 
     def save_daily_attribution(self, df: pd.DataFrame) -> None:
-        """Upsert daily attribution keyed on (date, portfolio_name, ticker)."""
-        self._upsert_parquet(
-            self._daily_attribution_path(), df, ["date", "portfolio_name", "ticker"],
+        """Replace each portfolio's whole attribution set.
+
+        Per-row ``contribution_to_return`` is path-independent, but readers
+        sum it over a window, so a row set mixed from runs with different
+        position sets double-counts. The series is replaced as a unit for
+        the same reason the portfolio metrics are.
+        """
+        self._replace_parquet(
+            self._daily_attribution_path(), df, ["portfolio_name"],
         )
 
     def get_daily_attribution(
