@@ -13,7 +13,7 @@ export default defineConfig({
     // through to Vite and the view shows "the API isn't responding".
     // Keep in step with app.include_router(...) in src/api/main.py.
     proxy: Object.fromEntries(
-      ['/dashboard', '/exposure', '/risk', '/income', '/portfolios', '/prices', '/reports',
+      ['/dashboard', '/exposure', '/risk', '/income', '/performance', '/portfolios', '/prices', '/reports',
        '/scenarios', '/benchmarks', '/groups', '/trades', '/agents',
        '/summaries', '/production', '/trading-graph', '/health']
         .map((p) => [p, { target: API, changeOrigin: true }]),
