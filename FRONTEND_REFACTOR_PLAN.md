@@ -95,6 +95,8 @@ Aggregating them client-side was considered and rejected. Attribution windows di
 
 ### Task 1: `/performance` aggregate endpoint
 
+**Status: done — `e7ef9cf`.**
+
 Mirrors the Streamlit **Price History** tab: normalised price series, cumulative returns, and trailing return stats — computed server-side so the SPA holds no analytics.
 
 **Why a new endpoint rather than reusing `/prices/history`:** that endpoint takes a ticker list, so the screen would have to fetch `/dashboard` first to learn its tickers, then rebase and compute returns in TypeScript. Both the extra round trip and the client-side maths break the conventions in `src/services/CLAUDE.md`.
@@ -479,6 +481,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ### Task 2: Performance screen
 
+**Status: done — `beda4d4`.**
+
 **Files:**
 - Create: `frontend/src/components/LineChart.tsx`
 - Create: `frontend/src/views/Performance.tsx`
@@ -779,6 +783,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ---
 
 ### Task 3: Attribution screen + the picker gate
+
+**Status: done — `b237bac`.**
 
 Implements the "needs a portfolio" rule for the first time. Tasks 4 and 5 reuse `NeedsPortfolio` verbatim.
 
@@ -1214,10 +1220,15 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## BLOCKER: `daily_portfolio_metrics.parquet` is incoherent
+## RESOLVED: `daily_portfolio_metrics.parquet` was incoherent
 
-**Found while starting Task 3. Task 3 is paused on it.** This is a backend
-data bug, not a frontend one, and it predates this plan.
+**Fixed in `3c57874`; both datasets repaired; Task 3 shipped on the
+corrected data.** Kept here because the invariant is easy to break again
+and the failure is silent. The durable version lives in
+`src/database/CLAUDE.md` § Invariants, and
+`tests/test_attribution_coherence.py` fails if it regresses.
+
+This was a backend data bug, not a frontend one, and it predated this plan.
 
 `Database.save_daily_portfolio_metrics` (`src/database/database.py:605`)
 **upserts keyed on `(date, portfolio_name)`**. But `cum_return`,
@@ -1262,8 +1273,13 @@ same problem — it upserts on `(date, portfolio_name, ticker)`, and
 `contribution_to_return` is summed over the window by the reader, so a
 mixture of runs corrupts it the same way.
 
-Do **not** build the Attribution screen on the current data: its headline
-number is wrong by 148 points for PRU401K.
+**What was done.** Writers now use `_replace_parquet`, scoped by
+`portfolio_name` / `ticker`, so a series is only ever stored whole;
+`refresh_all` always recomputes from inception, and its `start_date` /
+`full` arguments no longer truncate the window. `daily_security_metrics`
+had the identical defect through its own per-ticker `cum_return` and was
+fixed the same way. Corrected live figures: SCHAB +31.65%, PRU401K
++60.93%, ESPP +41.27% — all coherent to 0.00e+00 drift.
 
 ## Follow-ups on shipped screens
 
