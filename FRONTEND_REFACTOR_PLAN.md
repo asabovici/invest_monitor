@@ -1214,6 +1214,57 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
+## BLOCKER: `daily_portfolio_metrics.parquet` is incoherent
+
+**Found while starting Task 3. Task 3 is paused on it.** This is a backend
+data bug, not a frontend one, and it predates this plan.
+
+`Database.save_daily_portfolio_metrics` (`src/database/database.py:605`)
+**upserts keyed on `(date, portfolio_name)`**. But `cum_return`,
+`drawdown` and `max_drawdown` are *path-dependent* — each is a running
+figure compounded from the start of the window it was computed over. A
+refresh that covers a different window, or runs against a different
+position set (v1 static-current vs v2 trade-replay), overwrites only the
+dates it touched. The stored series then mixes values compounded from
+several different baselines, and is not a coherent series at all.
+
+`daily_return` is path-independent per row, so it survives the merge — but
+the *set of rows* does not, because different runs cover different date
+ranges and position sets.
+
+Evidence, live dataset:
+
+| Portfolio | stored rows | fresh rows | compounded from stored | fresh compute |
+|---|---|---|---|---|
+| SCHAB | 111 | 1399 | +2.10% | **+46.77%** |
+| PRU401K | 1346 | 1347 | +146.14% | **+60.93%** |
+| ESPP | 893 | 1347 | −10.04% | **+36.77%** |
+
+A freshly computed frame is internally consistent — compounding its
+`daily_return` equals its own `cum_return` to 1e-6 — which localises the
+fault to the stored file and its write path, not to
+`AttributionEngine.compute_portfolio_history`, whose formula
+(`cumulative = (1 + port_return).cumprod()`) is correct by construction.
+
+**Blast radius — everything reading this file is affected:**
+- `src/services/reports.py:272` — `attribution()`, the Attribution screen
+- `src/services/benchmarks.py:131,167` — portfolio side of every comparison
+- `src/app.py:1163` — the Streamlit Performance Attribution tab
+- `src/services/dashboard.py` already refuses to use it for a net-worth
+  series, for a related reason documented there
+
+**The fix, at root:** a per-portfolio series is only coherent as a whole,
+so the write path must replace a portfolio's whole series rather than
+upsert per date. That means a `replace_daily_portfolio_metrics` (delete
+rows for the portfolio, then insert) and a refresh that always recomputes
+the full window. Worth checking whether `save_daily_attribution` has the
+same problem — it upserts on `(date, portfolio_name, ticker)`, and
+`contribution_to_return` is summed over the window by the reader, so a
+mixture of runs corrupts it the same way.
+
+Do **not** build the Attribution screen on the current data: its headline
+number is wrong by 148 points for PRU401K.
+
 ## Follow-ups on shipped screens
 
 Small enhancements to screens that are already merged. Each is
