@@ -194,3 +194,23 @@ export interface IncomeReport {
 
 export const fetchIncome = (dataDir?: string, portfolio?: string | null) =>
   get<IncomeReport>(`/income${qs({ portfolio })}`, dataDir)
+
+export interface TickerSeries {
+  ticker: string
+  asset_type: string
+  market_value: number
+  /** Index-for-index with `dates`; null before the ticker's first sample. */
+  cumulative_return: (number | null)[]
+  total_return: number
+}
+export interface PerformanceReport {
+  dates: string[]
+  series: TickerSeries[]
+  portfolio_cumulative_return: (number | null)[]
+  portfolio_total_return: number
+  excluded: string[]
+}
+
+export const fetchPerformance = (
+  dataDir?: string, portfolio?: string | null, start?: string | null,
+) => get<PerformanceReport>(`/performance${qs({ portfolio, start })}`, dataDir)

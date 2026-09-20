@@ -4,11 +4,12 @@ import { Dashboard } from './views/Dashboard'
 import { Exposure } from './views/Exposure'
 import { Holdings } from './views/Holdings'
 import { Income } from './views/Income'
+import { Performance } from './views/Performance'
 import { Risk } from './views/Risk'
 
-type View = 'dashboard' | 'holdings' | 'exposure' | 'risk' | 'income'
+type View = 'dashboard' | 'holdings' | 'performance' | 'exposure' | 'risk' | 'income'
 
-const VIEWS: View[] = ['dashboard', 'holdings', 'exposure', 'risk', 'income']
+const VIEWS: View[] = ['dashboard', 'holdings', 'performance', 'exposure', 'risk', 'income']
 
 /** `null` means every portfolio — the default, and what the API serves when
  *  the `portfolio` param is absent. */
@@ -54,6 +55,10 @@ const NAV: { id: View; label: string; icon: ReactNode }[] = [
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M3 3v18h18" /><path d="M7 14l4-4 3 3 5-6" />
     </svg>) },
+  { id: 'performance', label: 'Performance', icon: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M3 17l5-6 4 4 4-7 5 5" /><path d="M3 21h18" />
+    </svg>) },
   { id: 'exposure', label: 'Exposure', icon: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="12" cy="12" r="9" /><path d="M12 3v9l6.5 6.5" />
@@ -69,8 +74,8 @@ const NAV: { id: View; label: string; icon: ReactNode }[] = [
 ]
 
 const TITLES: Record<View, string> = {
-  dashboard: 'Portfolio', holdings: 'Holdings', exposure: 'Exposure',
-  risk: 'Risk', income: 'Income',
+  dashboard: 'Portfolio', holdings: 'Holdings', performance: 'Performance',
+  exposure: 'Exposure', risk: 'Risk', income: 'Income',
 }
 
 const AllIcon = (
@@ -168,6 +173,8 @@ export default function App() {
           <Dashboard {...props} />
         ) : route.view === 'holdings' ? (
           <Holdings {...props} />
+        ) : route.view === 'performance' ? (
+          <Performance {...props} />
         ) : route.view === 'exposure' ? (
           <Exposure {...props} />
         ) : route.view === 'risk' ? (

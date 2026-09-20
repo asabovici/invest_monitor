@@ -266,3 +266,12 @@ tbody tr:hover { background: var(--bg); }
 
 /* ── Income ────────────────────────────────────────────────────────────── */
 .freq { font-size: 10.5px; border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; color: var(--ink-3); }
+
+/* ── Line chart ────────────────────────────────────────────────────────── */
+.linechart { position: relative; }
+.readout {
+  display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center;
+  margin-top: 10px; font-size: 11.5px; color: var(--ink-2); min-height: 17px;
+}
+.readout span { display: inline-flex; align-items: center; gap: 6px; }
+.readout .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
