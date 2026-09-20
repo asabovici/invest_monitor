@@ -1214,6 +1214,41 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
+## Follow-ups on shipped screens
+
+Small enhancements to screens that are already merged. Each is
+self-contained; pick one up between tasks.
+
+### Performance — top/bottom X in "Return by holding"
+
+**Status:** open. **File:** `frontend/src/views/Performance.tsx`.
+
+The table currently renders `rep.series` in full — 36 rows unscoped, 32 for
+SCHAB. The series arrive sorted by market value, so the best and worst
+performers are scattered through it and the question "what actually won and
+lost?" needs a manual scan.
+
+Add a selector above the table offering **Top 10 / Bottom 10 / All**, sorted
+by `total_return` rather than by value. Follow the existing segmented-control
+pattern — `<button className="seg" aria-pressed={...}>` — as used by
+`components/HoldingsTable.tsx` (Top 12 / All) and `views/Income.tsx`
+(Top 10 / All), so it reads as the same control.
+
+Two things to get right:
+
+- **Sort by return, not value, when the mode is Top/Bottom.** Under All,
+  keep the existing value order — re-sorting the default view would change
+  what the screen has always shown.
+- **Say which order is active.** A table headed "Return by holding" showing
+  10 of 36 rows is ambiguous about *which* 10. Put the count and the basis
+  in the heading, the way the chart already does
+  (`Cumulative return — largest 8 of 32`).
+
+Worth doing at the same time: the chart charts the largest 8 *by value*. If
+the table gains a by-return view, consider whether the chart should offer
+the same, since "my biggest holdings" and "my best holdings" are different
+questions and the screen currently only answers the first.
+
 ## Beyond this plan
 
 Not scoped here; each needs its own brainstorm before planning.
