@@ -29,7 +29,9 @@ function BucketBars({ buckets, colorOf }: { buckets: IncomeBucket[]; colorOf: (b
   )
 }
 
-export function Income({ dataDir }: { dataDir: string }) {
+export function Income(
+  { dataDir, portfolio }: { dataDir: string; portfolio: string | null },
+) {
   const [rep, setRep] = useState<IncomeReport | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
   const [all, setAll] = useState(false)
@@ -37,18 +39,20 @@ export function Income({ dataDir }: { dataDir: string }) {
   useEffect(() => {
     let live = true
     setRep(null); setError(null)
-    fetchIncome(dataDir)
+    fetchIncome(dataDir, portfolio)
       .then((d) => live && setRep(d))
       .catch((e) => live && setError(e instanceof ApiError ? e : new ApiError(0, String(e))))
     return () => { live = false }
-  }, [dataDir])
+  }, [dataDir, portfolio])
 
   if (error) {
     return (
       <div className="card state">
         <h2>Can’t load income</h2>
         <p>{error.status === 0 ? 'The API isn’t responding.' : error.message}</p>
-        <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        {error.status === 0 && (
+          <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        )}
       </div>
     )
   }
@@ -107,10 +111,13 @@ export function Income({ dataDir }: { dataDir: string }) {
           <BucketBars buckets={rep.by_asset_type} colorOf={(b) => colorForType(b.label)} />
         </section>
 
-        <section className="card pad">
-          <h2 className="h2">By account</h2>
-          <Donut slices={accountSlices} title="Annual income by account" />
-        </section>
+        {/* See Dashboard: a single-slice donut under a scope is noise. */}
+        {!portfolio && (
+          <section className="card pad">
+            <h2 className="h2">By account</h2>
+            <Donut slices={accountSlices} title="Annual income by account" />
+          </section>
+        )}
       </div>
 
       <section className="card pad">

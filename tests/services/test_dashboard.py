@@ -123,3 +123,48 @@ def test_too_short_a_window_is_rejected(data_dir):
     today = pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
     with pytest.raises(ValueError, match="too little history"):
         dashboard.get_snapshot(data_dir, start=today)
+
+
+class TestPortfolioScoping:
+    """Scoping narrows the snapshot to one portfolio; absent means all."""
+
+    def test_scoped_snapshot_holds_only_that_portfolio(self, data_dir):
+        snap = dashboard.get_snapshot(data_dir, portfolio="Demo Brokerage")
+        assert snap.holdings, "expected the demo brokerage account to have holdings"
+        assert {h.account for h in snap.holdings} == {"Demo Brokerage"}
+
+    def test_scoped_totals_by_account_has_one_entry(self, data_dir):
+        snap = dashboard.get_snapshot(data_dir, portfolio="Demo Brokerage")
+        assert list(snap.totals_by_account) == ["Demo Brokerage"]
+
+    def test_scopes_partition_the_unscoped_total(self, data_dir):
+        """Every dollar lands in exactly one scope — no double-count, no drop."""
+        whole = dashboard.get_snapshot(data_dir)
+        parts = [
+            dashboard.get_snapshot(data_dir, portfolio=name)
+            for name in _get_db(data_dir).list_portfolios()
+        ]
+        assert sum(p.market_value for p in parts) == pytest.approx(
+            whole.market_value, abs=0.01
+        )
+        assert sum(p.cost for p in parts) == pytest.approx(whole.cost, abs=0.01)
+
+    def test_scoped_series_still_reconciles_with_headline(self, data_dir):
+        snap = dashboard.get_snapshot(data_dir, portfolio="Demo Brokerage")
+        assert snap.series.total[-1] == pytest.approx(snap.market_value, rel=1e-6)
+
+    def test_scoped_series_is_aligned_to_the_same_dates(self, data_dir):
+        """A scoped chart must share the unscoped x-axis, not a shorter one."""
+        whole = dashboard.get_snapshot(data_dir)
+        snap = dashboard.get_snapshot(data_dir, portfolio="Demo Brokerage")
+        assert snap.series.dates == whole.series.dates
+
+    def test_unknown_portfolio_is_not_found(self, data_dir):
+        with pytest.raises(ValueError, match="not found"):
+            dashboard.get_snapshot(data_dir, portfolio="No Such Account")
+
+    def test_absent_scope_is_unchanged(self, data_dir):
+        """The default path must stay byte-identical to the unscoped call."""
+        assert dashboard.get_snapshot(data_dir) == dashboard.get_snapshot(
+            data_dir, portfolio=None
+        )

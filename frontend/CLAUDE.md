@@ -21,8 +21,24 @@ npm run build                 # tsc -b && vite build
 | `views/Risk.tsx` | `/risk` | Success ring, fan chart, trailing metrics |
 | `views/Income.tsx` | `/income` | Projection by type, account and holding |
 
-Routing is the URL hash (`#risk`), handled by `useHashView` in `App.tsx` —
-so screens are deep-linkable and Back works. There is no router library.
+Routing is the URL hash, handled by `useHashRoute` in `App.tsx` — so
+screens are deep-linkable and Back works. There is no router library. The
+hash carries the scope as well as the view (`#risk?portfolio=SCHAB`), so a
+scoped screen is as linkable as an unscoped one.
+
+## Scope
+
+The rail's **Scope** group picks one portfolio or All. All is `null`, which
+means the `portfolio` param is omitted and the API serves every account —
+so the unscoped request is byte-identical to the one that existed before
+scoping. Every view takes `portfolio: string | null` and passes it to its
+fetcher; nothing else about a view changes with scope except the three
+places noted below.
+
+Portfolios with no positions are left out of the selector. The live dataset
+has six, and scoping to one shows $0 on the Dashboard and a 400 on the
+other three screens. A direct link to one still resolves — the filter only
+decides what the rail offers.
 
 ## Things that will bite you
 
@@ -44,6 +60,15 @@ so screens are deep-linkable and Back works. There is no router library.
   normal-vision floor, contrast. Two blues adjacent in the order failed;
   that's why there's a rose. Re-run the validator before changing any of the
   `--c1`…`--c5` tokens.
+- **Three views degenerate under a scope, and handle it.** Grouping by
+  account is meaningless when every holding shares one: the Dashboard and
+  Income by-account donuts are hidden, and Holdings forces asset-type
+  grouping and drops the toggle. `.cols` is `auto-fit`, so the surviving
+  card widens by itself — don't add a width override.
+- **A non-zero `ApiError.status` is not "the API is down."** Scoping made
+  404 (no such portfolio) and 400 (real but empty) reachable on every
+  screen, so the "start it with `invest-monitor serve`" hint renders only
+  when `status === 0`. Keep that guard when editing an error card.
 - **`erasableSyntaxOnly` is on.** No constructor parameter properties
   (`constructor(readonly x: number)`), and React 19 has no global `JSX`
   namespace — import `ReactNode` instead of writing `JSX.Element`.

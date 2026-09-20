@@ -212,7 +212,9 @@ npm run dev                      # UI on :5173
 ```
 
 Five screens, each backed by one aggregate endpoint so a page load is a
-single request:
+single request. The rail scopes every screen to one portfolio or to all of
+them; the scope lives in the URL hash (`#risk?portfolio=SCHAB`), so a
+scoped screen is linkable:
 
 | Screen | Endpoint | Shows |
 |---|---|---|

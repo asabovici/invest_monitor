@@ -54,7 +54,9 @@ function GroupList({ holdings, showAccount }: { holdings: Holding[]; showAccount
   )
 }
 
-export function Holdings({ dataDir }: { dataDir: string }) {
+export function Holdings(
+  { dataDir, portfolio }: { dataDir: string; portfolio: string | null },
+) {
   const [snap, setSnap] = useState<DashboardSnapshot | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
   const [by, setBy] = useState<GroupBy>('account')
@@ -63,11 +65,16 @@ export function Holdings({ dataDir }: { dataDir: string }) {
   useEffect(() => {
     let live = true
     setSnap(null); setError(null)
-    fetchDashboard(dataDir)
+    fetchDashboard(dataDir, portfolio)
       .then((d) => live && setSnap(d))
       .catch((e) => live && setError(e instanceof ApiError ? e : new ApiError(0, String(e))))
     return () => { live = false }
-  }, [dataDir])
+  }, [dataDir, portfolio])
+
+  // Under a scope every holding shares an account, so that grouping would
+  // produce a single group wrapping the whole list. Fall back to asset
+  // type rather than rendering a degenerate heading.
+  const effectiveBy: GroupBy = portfolio ? 'asset_type' : by
 
   const groups = useMemo(() => {
     if (!snap) return []
@@ -78,15 +85,17 @@ export function Holdings({ dataDir }: { dataDir: string }) {
           h.name.toLowerCase().includes(q) ||
           h.account.toLowerCase().includes(q))
       : snap.holdings
-    return group(rows, by)
-  }, [snap, by, query])
+    return group(rows, effectiveBy)
+  }, [snap, effectiveBy, query])
 
   if (error) {
     return (
       <div className="card state">
         <h2>Can’t load holdings</h2>
         <p>{error.status === 0 ? 'The API isn’t responding.' : error.message}</p>
-        <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        {error.status === 0 && (
+          <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        )}
       </div>
     )
   }
@@ -132,12 +141,18 @@ export function Holdings({ dataDir }: { dataDir: string }) {
         </div>
 
         <div className="toolbar">
-          <input className="search" type="search" value={query} placeholder="Filter by ticker, name, or account"
+          <input className="search" type="search" value={query} placeholder={portfolio ? 'Filter by ticker or name' : 'Filter by ticker, name, or account'}
                  onChange={(e) => setQuery(e.target.value)} aria-label="Filter holdings" />
           <div className="spacer" />
-          <span className="sub">Group by</span>
-          <button className="seg" aria-pressed={by === 'account'} onClick={() => setBy('account')}>Account</button>
-          <button className="seg" aria-pressed={by === 'asset_type'} onClick={() => setBy('asset_type')}>Asset type</button>
+          {portfolio ? (
+            <span className="sub">Grouped by asset type</span>
+          ) : (
+            <>
+              <span className="sub">Group by</span>
+              <button className="seg" aria-pressed={by === 'account'} onClick={() => setBy('account')}>Account</button>
+              <button className="seg" aria-pressed={by === 'asset_type'} onClick={() => setBy('asset_type')}>Asset type</button>
+            </>
+          )}
         </div>
 
         {snap.unpriced.length > 0 && (

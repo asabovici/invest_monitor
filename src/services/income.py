@@ -46,16 +46,19 @@ def _bucket(rows: list[IncomeHolding], key) -> list[IncomeBucket]:
     return sorted(out, key=lambda b: -b.annual_income)
 
 
-def get_income(data_dir: str) -> IncomeReport:
-    """Projected income across every account.
+def get_income(data_dir: str, portfolio: str | None = None) -> IncomeReport:
+    """Projected income across every account, or one when scoped.
+
+    ``portfolio`` scopes the report to one account; ``None`` spans every
+    portfolio.
 
     Raises:
-        ValueError: no priced holdings.
+        ValueError: no priced holdings, or an unknown ``portfolio``.
     """
     from src.services.dashboard import get_snapshot
     from src.services.reports import income_projection
 
-    snap = get_snapshot(data_dir)
+    snap = get_snapshot(data_dir, portfolio=portfolio)
     if not snap.holdings:
         raise ValueError("No priced holdings — nothing to project.")
 
@@ -67,7 +70,8 @@ def get_income(data_dir: str) -> IncomeReport:
     # The per-portfolio service owns the rate arithmetic; key its rows by
     # ticker so they can be matched back to the priced holdings.
     projected: dict[tuple[str, str], float] = {}
-    for account in db.list_portfolios():
+    accounts = [portfolio] if portfolio is not None else db.list_portfolios()
+    for account in accounts:
         try:
             report = income_projection(data_dir, account, latest_prices=latest)
         except ValueError:

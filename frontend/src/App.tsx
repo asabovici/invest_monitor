@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { fetchPortfolios } from './api'
 import { Dashboard } from './views/Dashboard'
 import { Exposure } from './views/Exposure'
 import { Holdings } from './views/Holdings'
@@ -9,24 +10,38 @@ type View = 'dashboard' | 'holdings' | 'exposure' | 'risk' | 'income'
 
 const VIEWS: View[] = ['dashboard', 'holdings', 'exposure', 'risk', 'income']
 
-const viewFromHash = (): View => {
-  const h = window.location.hash.replace(/^#\/?/, '')
-  return (VIEWS as string[]).includes(h) ? (h as View) : 'dashboard'
+/** `null` means every portfolio — the default, and what the API serves when
+ *  the `portfolio` param is absent. */
+interface Route { view: View; portfolio: string | null }
+
+const routeFromHash = (): Route => {
+  const raw = window.location.hash.replace(/^#\/?/, '')
+  const cut = raw.indexOf('?')
+  const head = cut === -1 ? raw : raw.slice(0, cut)
+  const params = new URLSearchParams(cut === -1 ? '' : raw.slice(cut + 1))
+  return {
+    view: (VIEWS as string[]).includes(head) ? (head as View) : 'dashboard',
+    portfolio: params.get('portfolio') || null,
+  }
 }
 
-/** Keeps the view in the URL hash so screens are deep-linkable and Back works. */
-function useHashView() {
-  const [view, setView] = useState<View>(viewFromHash)
+const hashFor = ({ view, portfolio }: Route): string =>
+  portfolio ? `${view}?${new URLSearchParams({ portfolio })}` : view
+
+/** Keeps view *and* scope in the URL hash, so a scoped screen is as
+ *  deep-linkable as an unscoped one and Back steps through both. */
+function useHashRoute() {
+  const [route, setRoute] = useState<Route>(routeFromHash)
   useEffect(() => {
-    const sync = () => setView(viewFromHash())
+    const sync = () => setRoute(routeFromHash())
     window.addEventListener('hashchange', sync)
     return () => window.removeEventListener('hashchange', sync)
   }, [])
-  const go = (v: View) => {
-    window.location.hash = v
-    setView(v)
-  }
-  return [view, go] as const
+  const go = useCallback((next: Route) => {
+    window.location.hash = hashFor(next)
+    setRoute(next)
+  }, [])
+  return [route, go] as const
 }
 
 const NAV: { id: View; label: string; icon: ReactNode }[] = [
@@ -58,9 +73,47 @@ const TITLES: Record<View, string> = {
   risk: 'Risk', income: 'Income',
 }
 
+const AllIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
+  </svg>
+)
+const OneIcon = (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M3 7h18v12H3z" /><path d="M8 7V5h8v2" />
+  </svg>
+)
+
 export default function App() {
-  const [view, go] = useHashView()
+  const [route, go] = useHashRoute()
   const [dataDir, setDataDir] = useState('data')
+  const [names, setNames] = useState<string[]>([])
+
+  // The rail's list comes from the cheap listing endpoint — no price reads,
+  // so populating the selector costs nothing even on a scoped deep link.
+  //
+  // Empty portfolios are left out: the live dataset has six of them, and
+  // scoping to one shows $0 on the Dashboard and a 400 on the other three
+  // screens. They still resolve if linked to directly — this only decides
+  // what the selector offers.
+  useEffect(() => {
+    let live = true
+    fetchPortfolios(dataDir)
+      .then((ps) => live && setNames(
+        ps.filter((p) => p.position_count > 0).map((p) => p.name)))
+      .catch(() => live && setNames([]))
+    return () => { live = false }
+  }, [dataDir])
+
+  // A scope from one dataset rarely names a portfolio in the other, and a
+  // stale name is a 404 on every screen. Switching datasets resets to All.
+  const switchDataset = (dir: string) => {
+    setDataDir(dir)
+    if (route.portfolio) go({ view: route.view, portfolio: null })
+  }
+
+  const scope = route.portfolio
+  const props = { dataDir, portfolio: scope }
 
   return (
     <div className="shell">
@@ -68,18 +121,31 @@ export default function App() {
         <div className="brand"><b>Invest</b><span>Monitor</span></div>
         <nav className="nav" aria-label="Main">
           {NAV.map((n) => (
-            <button key={n.id} onClick={() => go(n.id)}
-                    aria-current={view === n.id ? 'page' : undefined}>
+            <button key={n.id} onClick={() => go({ view: n.id, portfolio: scope })}
+                    aria-current={route.view === n.id ? 'page' : undefined}>
               {n.icon}{n.label}
             </button>
           ))}
+
+          <div className="navlabel">Scope</div>
+          <button onClick={() => go({ view: route.view, portfolio: null })}
+                  aria-current={scope === null ? 'page' : undefined}>
+            {AllIcon}All portfolios
+          </button>
+          {names.map((name) => (
+            <button key={name} onClick={() => go({ view: route.view, portfolio: name })}
+                    aria-current={scope === name ? 'page' : undefined}>
+              {OneIcon}{name}
+            </button>
+          ))}
+
           <div className="navlabel">Dataset</div>
-          <button onClick={() => setDataDir('data')} aria-current={dataDir === 'data' ? 'page' : undefined}>
+          <button onClick={() => switchDataset('data')} aria-current={dataDir === 'data' ? 'page' : undefined}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <ellipse cx="12" cy="6" rx="8" ry="3" /><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6" />
             </svg>Live
           </button>
-          <button onClick={() => setDataDir('data_demo')} aria-current={dataDir === 'data_demo' ? 'page' : undefined}>
+          <button onClick={() => switchDataset('data_demo')} aria-current={dataDir === 'data_demo' ? 'page' : undefined}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M8 9h8M8 13h5" />
             </svg>Demo
@@ -89,21 +155,25 @@ export default function App() {
 
       <main className="main">
         <div className="topbar">
-          <h1>{TITLES[view]}</h1>
+          <h1>{TITLES[route.view]}</h1>
+          {/* The scope is named in the header because every number below it
+              changes meaning with it — a scoped screen must never be
+              mistakeable for the whole portfolio. */}
+          <span className="scopechip">{scope ?? 'All portfolios'}</span>
           <div className="spacer" />
           <span className="sub num">{dataDir === 'data' ? 'Live dataset' : 'Demo dataset'}</span>
         </div>
 
-        {view === 'dashboard' ? (
-          <Dashboard dataDir={dataDir} />
-        ) : view === 'holdings' ? (
-          <Holdings dataDir={dataDir} />
-        ) : view === 'exposure' ? (
-          <Exposure dataDir={dataDir} />
-        ) : view === 'risk' ? (
-          <Risk dataDir={dataDir} />
+        {route.view === 'dashboard' ? (
+          <Dashboard {...props} />
+        ) : route.view === 'holdings' ? (
+          <Holdings {...props} />
+        ) : route.view === 'exposure' ? (
+          <Exposure {...props} />
+        ) : route.view === 'risk' ? (
+          <Risk {...props} />
         ) : (
-          <Income dataDir={dataDir} />
+          <Income {...props} />
         )}
       </main>
     </div>

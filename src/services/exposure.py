@@ -126,14 +126,19 @@ def _breakdown(
     )
 
 
-def get_exposure(data_dir: str) -> ExposureReport:
+def get_exposure(data_dir: str, portfolio: str | None = None) -> ExposureReport:
     """Look-through exposure by asset class and by equity sector.
 
-    Raises ``ValueError`` when the portfolio has no priced holdings.
+    ``portfolio`` scopes the report to one account; ``None`` spans every
+    portfolio. Scoping is applied to the snapshot, so the look-through is
+    recomputed against the scoped holdings rather than resliced.
+
+    Raises ``ValueError`` when the portfolio has no priced holdings, or
+    when ``portfolio`` names one that does not exist.
     """
     from src.services.dashboard import get_snapshot
 
-    snap = get_snapshot(data_dir)
+    snap = get_snapshot(data_dir, portfolio=portfolio)
     if not snap.holdings:
         raise ValueError("No priced holdings — nothing to break down.")
 

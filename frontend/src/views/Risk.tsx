@@ -35,7 +35,9 @@ function verdict(p: number) {
   return { word: 'unlikely', tone: '--neg', mark: '!' }
 }
 
-export function Risk({ dataDir }: { dataDir: string }) {
+export function Risk(
+  { dataDir, portfolio }: { dataDir: string; portfolio: string | null },
+) {
   const [rep, setRep] = useState<RiskReport | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
   const [years, setYears] = useState(20)
@@ -45,18 +47,20 @@ export function Risk({ dataDir }: { dataDir: string }) {
   useEffect(() => {
     let live = true
     setRep(null); setError(null)
-    fetchRisk({ dataDir, years, goal, monthly })
+    fetchRisk({ dataDir, years, goal, monthly, portfolio })
       .then((d) => live && setRep(d))
       .catch((e) => live && setError(e instanceof ApiError ? e : new ApiError(0, String(e))))
     return () => { live = false }
-  }, [dataDir, years, goal, monthly])
+  }, [dataDir, portfolio, years, goal, monthly])
 
   if (error) {
     return (
       <div className="card state">
         <h2>Can’t load risk</h2>
         <p>{error.status === 0 ? 'The API isn’t responding.' : error.message}</p>
-        <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        {error.status === 0 && (
+          <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        )}
       </div>
     )
   }

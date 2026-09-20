@@ -6,7 +6,9 @@ import { HoldingsTable } from '../components/HoldingsTable'
 import { StackedBars } from '../components/StackedBars'
 import { ValueChart } from '../components/ValueChart'
 
-export function Dashboard({ dataDir }: { dataDir: string }) {
+export function Dashboard(
+  { dataDir, portfolio }: { dataDir: string; portfolio: string | null },
+) {
   const [snap, setSnap] = useState<DashboardSnapshot | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
 
@@ -14,18 +16,20 @@ export function Dashboard({ dataDir }: { dataDir: string }) {
     let live = true
     setSnap(null)
     setError(null)
-    fetchDashboard(dataDir)
+    fetchDashboard(dataDir, portfolio)
       .then((d) => live && setSnap(d))
       .catch((e) => live && setError(e instanceof ApiError ? e : new ApiError(0, String(e))))
     return () => { live = false }
-  }, [dataDir])
+  }, [dataDir, portfolio])
 
   if (error) {
     return (
       <div className="card state">
         <h2>Can’t load the dashboard</h2>
         <p>{error.status === 0 ? 'The API isn’t responding.' : error.message}</p>
-        <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        {error.status === 0 && (
+          <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        )}
       </div>
     )
   }
@@ -85,10 +89,15 @@ export function Dashboard({ dataDir }: { dataDir: string }) {
           <h2 className="h2">By asset type</h2>
           <Donut slices={byType} title="Portfolio value by asset type" />
         </section>
-        <section className="card pad">
-          <h2 className="h2">By account</h2>
-          <Donut slices={byAccount} title="Portfolio value by account" />
-        </section>
+        {/* One account under a scope — a donut of a single slice says
+            nothing the header hasn't already said. `.cols` is auto-fit,
+            so the remaining card widens on its own. */}
+        {!portfolio && (
+          <section className="card pad">
+            <h2 className="h2">By account</h2>
+            <Donut slices={byAccount} title="Portfolio value by account" />
+          </section>
+        )}
       </div>
 
       <section className="card pad">

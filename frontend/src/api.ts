@@ -73,8 +73,31 @@ async function get<T>(path: string, dataDir?: string): Promise<T> {
   return (await res.json()) as T
 }
 
-export const fetchDashboard = (dataDir?: string) =>
-  get<DashboardSnapshot>('/dashboard', dataDir)
+/** Builds a query string, omitting empty values so an unscoped request
+ *  stays byte-identical to the URL the API served before scoping existed. */
+function qs(params: Record<string, string | number | undefined | null>): string {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') q.set(k, String(v))
+  }
+  const s = q.toString()
+  return s ? `?${s}` : ''
+}
+
+export interface PortfolioSummary {
+  name: string
+  position_count: number
+  /** Σ(quantity × cost_basis_per_share). Cost, not market value. */
+  total_cost: number
+}
+
+/** Names for the scope selector. Deliberately the cheap listing endpoint —
+ *  it reads no price files, so the rail costs nothing to populate. */
+export const fetchPortfolios = (dataDir?: string) =>
+  get<PortfolioSummary[]>('/portfolios', dataDir)
+
+export const fetchDashboard = (dataDir?: string, portfolio?: string | null) =>
+  get<DashboardSnapshot>(`/dashboard${qs({ portfolio })}`, dataDir)
 
 export interface Slice { label: string; value: number; weight: number }
 export interface Contributor { ticker: string; name: string; value: number }
@@ -96,8 +119,8 @@ export interface ExposureReport {
   renormalised_funds: string[]
 }
 
-export const fetchExposure = (dataDir?: string) =>
-  get<ExposureReport>('/exposure', dataDir)
+export const fetchExposure = (dataDir?: string, portfolio?: string | null) =>
+  get<ExposureReport>(`/exposure${qs({ portfolio })}`, dataDir)
 
 export interface RiskMetrics {
   annualised_volatility: number
@@ -137,14 +160,17 @@ export interface RiskReport {
 
 export const fetchRisk = (params: {
   dataDir?: string; years: number; goal?: number; monthly: number
-}) => {
-  const q = new URLSearchParams({
-    years: String(params.years),
-    monthly_contribution: String(params.monthly),
-  })
-  if (params.goal) q.set('goal_amount', String(params.goal))
-  return get<RiskReport>(`/risk?${q}`, params.dataDir)
-}
+  portfolio?: string | null
+}) =>
+  get<RiskReport>(
+    `/risk${qs({
+      years: params.years,
+      monthly_contribution: params.monthly,
+      goal_amount: params.goal || undefined,
+      portfolio: params.portfolio,
+    })}`,
+    params.dataDir,
+  )
 
 export interface IncomeHolding {
   ticker: string; name: string; account: string; asset_type: string
@@ -166,4 +192,5 @@ export interface IncomeReport {
   non_income_tickers: string[]
 }
 
-export const fetchIncome = (dataDir?: string) => get<IncomeReport>('/income', dataDir)
+export const fetchIncome = (dataDir?: string, portfolio?: string | null) =>
+  get<IncomeReport>(`/income${qs({ portfolio })}`, dataDir)

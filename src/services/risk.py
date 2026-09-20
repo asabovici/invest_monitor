@@ -285,12 +285,18 @@ def get_risk(
     goal_amount: float | None = None,
     monthly_contribution: float = 0.0,
     num_simulations: int = 2000,
+    portfolio: str | None = None,
 ) -> RiskReport:
-    """Risk metrics plus a Monte Carlo projection for the whole portfolio.
+    """Risk metrics plus a Monte Carlo projection for the portfolio.
+
+    ``portfolio`` scopes the report to one account; ``None`` spans every
+    portfolio. The weights are read off the scoped snapshot, so the
+    projection is fitted to that account's actual mix rather than being
+    resliced from an aggregate fit.
 
     Raises:
-        ValueError: no priced holdings, no usable return history, or an
-            out-of-range parameter.
+        ValueError: no priced holdings, no usable return history, an
+            out-of-range parameter, or an unknown ``portfolio``.
     """
     if years <= 0 or years > 60:
         raise ValueError("years must be between 0 and 60.")
@@ -301,7 +307,7 @@ def get_risk(
 
     from src.services.dashboard import get_snapshot
 
-    snap = get_snapshot(data_dir)
+    snap = get_snapshot(data_dir, portfolio=portfolio)
     if not snap.holdings:
         raise ValueError("No priced holdings — nothing to model.")
 

@@ -59,6 +59,11 @@ the authoritative list. High-level groupings:
 | `/income` | Portfolio-wide income projection |
 | `/health` | Liveness probe |
 
+All four screen endpoints take an optional `?portfolio=` to scope the
+payload to one account; omitting it spans every account. An unknown name
+is a 404; a real-but-empty portfolio is a 200 with zeroes on `/dashboard`
+and a 400 on the other three, which have nothing to compute.
+
 ### Screen endpoints vs resource endpoints
 
 `/dashboard`, `/exposure`, `/risk` and `/income` are **screen-shaped**, not

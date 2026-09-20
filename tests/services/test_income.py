@@ -133,3 +133,30 @@ def test_bucket_yield_is_income_over_its_own_value(data_dir):
     for b in rep.by_asset_type:
         if b.market_value:
             assert b.yield_pct == pytest.approx(b.annual_income / b.market_value * 100, rel=1e-4)
+
+
+class TestPortfolioScoping:
+    """Income inherits its holdings from the snapshot, so it inherits scope."""
+
+    def test_scoped_income_holds_only_that_portfolio(self, data_dir):
+        rep = income.get_income(data_dir, portfolio="Demo Cash & CDs")
+        assert rep.holdings, "expected the demo cash account to pay income"
+        assert {h.account for h in rep.holdings} == {"Demo Cash & CDs"}
+
+    def test_scoped_by_account_has_one_bucket(self, data_dir):
+        rep = income.get_income(data_dir, portfolio="Demo Cash & CDs")
+        assert [b.label for b in rep.by_account] == ["Demo Cash & CDs"]
+
+    def test_scopes_partition_the_unscoped_income(self, data_dir):
+        whole = income.get_income(data_dir)
+        total = 0.0
+        for name in _get_db(data_dir).list_portfolios():
+            try:
+                total += income.get_income(data_dir, portfolio=name).annual_income
+            except ValueError:
+                pass  # a scope with no priced holdings contributes nothing
+        assert total == pytest.approx(whole.annual_income, abs=0.01)
+
+    def test_unknown_portfolio_is_not_found(self, data_dir):
+        with pytest.raises(ValueError, match="not found"):
+            income.get_income(data_dir, portfolio="No Such Account")

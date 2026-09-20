@@ -165,3 +165,34 @@ def test_top_contributors_name_real_holdings(data_dir):
     tickers = {h for lst in rep.by_asset_class.top_contributors.values() for h in [c.ticker for c in lst]}
     positions = set(pd.read_parquet(os.path.join(data_dir, "positions.parquet"))["ticker"])
     assert tickers <= positions
+
+
+class TestPortfolioScoping:
+    """Exposure inherits its holdings from the snapshot, so it inherits scope."""
+
+    def test_scoped_exposure_matches_the_scoped_snapshot(self, data_dir):
+        from src.services import dashboard
+
+        snap = dashboard.get_snapshot(data_dir, portfolio="Demo Brokerage")
+        rep = exposure.get_exposure(data_dir, portfolio="Demo Brokerage")
+        assert rep.market_value == pytest.approx(snap.market_value, abs=0.01)
+
+    def test_scoping_changes_the_breakdown(self, data_dir):
+        """Guard against the param being accepted and then ignored."""
+        whole = exposure.get_exposure(data_dir)
+        scoped = exposure.get_exposure(data_dir, portfolio="Demo Brokerage")
+        assert scoped.market_value < whole.market_value
+
+    def test_scopes_partition_the_unscoped_total(self, data_dir):
+        whole = exposure.get_exposure(data_dir)
+        total = 0.0
+        for name in _get_db(data_dir).list_portfolios():
+            try:
+                total += exposure.get_exposure(data_dir, portfolio=name).market_value
+            except ValueError:
+                pass  # a scope with no priced holdings contributes nothing
+        assert total == pytest.approx(whole.market_value, abs=0.01)
+
+    def test_unknown_portfolio_is_not_found(self, data_dir):
+        with pytest.raises(ValueError, match="not found"):
+            exposure.get_exposure(data_dir, portfolio="No Such Account")

@@ -63,25 +63,29 @@ function BarList({ breakdown, unit }: { breakdown: Breakdown; unit: string }) {
   )
 }
 
-export function Exposure({ dataDir }: { dataDir: string }) {
+export function Exposure(
+  { dataDir, portfolio }: { dataDir: string; portfolio: string | null },
+) {
   const [rep, setRep] = useState<ExposureReport | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
 
   useEffect(() => {
     let live = true
     setRep(null); setError(null)
-    fetchExposure(dataDir)
+    fetchExposure(dataDir, portfolio)
       .then((d) => live && setRep(d))
       .catch((e) => live && setError(e instanceof ApiError ? e : new ApiError(0, String(e))))
     return () => { live = false }
-  }, [dataDir])
+  }, [dataDir, portfolio])
 
   if (error) {
     return (
       <div className="card state">
         <h2>Can’t load exposure</h2>
         <p>{error.status === 0 ? 'The API isn’t responding.' : error.message}</p>
-        <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        {error.status === 0 && (
+          <p className="sub">Start it with <code>uv run invest-monitor serve</code>, then reload.</p>
+        )}
       </div>
     )
   }

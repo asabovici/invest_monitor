@@ -20,6 +20,9 @@ def get_risk(
     goal_amount: Annotated[float | None, Query(ge=0)] = None,
     monthly_contribution: Annotated[float, Query(ge=0)] = 0.0,
     num_simulations: Annotated[int, Query(ge=100, le=20000)] = 2000,
+    portfolio: Annotated[
+        str | None, Query(description="Scope to one portfolio; omit for all.")
+    ] = None,
 ) -> RiskReport:
     """Trailing risk metrics plus a forward Monte Carlo projection.
 
@@ -28,5 +31,6 @@ def get_risk(
     outcomes, not a confidence interval.
     """
     return risk_service.get_risk(
-        data_dir, years, goal_amount, monthly_contribution, num_simulations
+        data_dir, years, goal_amount, monthly_contribution, num_simulations,
+        portfolio,
     )

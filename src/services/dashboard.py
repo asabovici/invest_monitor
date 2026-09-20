@@ -67,14 +67,28 @@ def _resample(s: pd.Series | None, index: pd.DatetimeIndex, latest: float) -> pd
     return out
 
 
-def get_snapshot(data_dir: str, start: str = _DEFAULT_START) -> DashboardSnapshot:
+def get_snapshot(
+    data_dir: str, start: str = _DEFAULT_START, portfolio: str | None = None
+) -> DashboardSnapshot:
     """Aggregate everything the Dashboard screen renders.
 
     Holdings with no price and no par convention are excluded from totals
     and reported in ``unpriced`` rather than silently valued at zero.
+
+    ``portfolio`` scopes the snapshot to one account; ``None`` spans every
+    portfolio. Validation is against the portfolio list rather than the
+    positions, so a real-but-empty portfolio returns an empty snapshot
+    instead of being reported as missing.
+
+    Raises:
+        ValueError: ``portfolio`` names a portfolio that does not exist.
     """
     db = _get_db(data_dir)
     positions = pd.read_parquet(os.path.join(data_dir, "positions.parquet"))
+    if portfolio is not None:
+        if portfolio not in db.list_portfolios():
+            raise ValueError(f"Portfolio {portfolio!r} not found.")
+        positions = positions[positions["portfolio_name"] == portfolio]
     assets = db.get_all_assets().set_index("ticker")
     types = assets["asset_type"] if "asset_type" in assets.columns else pd.Series(dtype=str)
     names = assets["name"] if "name" in assets.columns else pd.Series(dtype=str)

@@ -228,3 +228,35 @@ def test_wealth_skills_use_the_shared_engine():
     source = (ROOT_SRC / "agent" / "wealth_skills.py").read_text()
     assert "simulate_paths" in source
     assert "paths = np.zeros" not in source, "a hand-rolled simulation is back"
+
+
+class TestPortfolioScoping:
+    """Risk inherits its holdings from the snapshot, so it inherits scope.
+
+    The projection is fitted to the scoped weights rather than resliced from
+    an aggregate fit — a single-account view of a three-account portfolio is
+    a different risk profile, not a fraction of the same one.
+    """
+
+    def test_scoped_risk_matches_the_scoped_snapshot(self, data_dir):
+        from src.services import dashboard
+
+        snap = dashboard.get_snapshot(data_dir, portfolio="Demo Brokerage")
+        rep = risk.get_risk(
+            data_dir, years=5, num_simulations=200, portfolio="Demo Brokerage"
+        )
+        assert rep.market_value == pytest.approx(snap.market_value, abs=0.01)
+
+    def test_scoping_changes_the_fitted_volatility(self, data_dir):
+        """An equity-only scope must not inherit the blended portfolio's vol."""
+        whole = risk.get_risk(data_dir, years=5, num_simulations=200)
+        scoped = risk.get_risk(
+            data_dir, years=5, num_simulations=200, portfolio="Demo Brokerage"
+        )
+        assert scoped.metrics.annualised_volatility != pytest.approx(
+            whole.metrics.annualised_volatility, abs=1e-9
+        )
+
+    def test_unknown_portfolio_is_not_found(self, data_dir):
+        with pytest.raises(ValueError, match="not found"):
+            risk.get_risk(data_dir, years=5, num_simulations=200, portfolio="No Such")
