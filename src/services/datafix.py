@@ -1073,6 +1073,20 @@ def preview_normalise_fund_weights(
 # ── Integrity scan ───────────────────────────────────────────────────────────
 
 
+def _sector_profiled_tickers(data_dir: str) -> set[str]:
+    """Funds that have a sector-weight profile stored for lookthrough."""
+    path = os.path.join(data_dir, "fund_profiles.parquet")
+    if not os.path.exists(path):
+        return set()
+    try:
+        df = pd.read_parquet(path)
+    except (OSError, ValueError):
+        return set()
+    if df.empty or "category" not in df.columns:
+        return set()
+    return set(df.loc[df["category"] == "sector", "fund_ticker"].astype(str))
+
+
 def scan_data_issues(data_dir: str, portfolio_name: str | None = None) -> ScanReport:
     """Find data problems across positions, assets, prices and fund holdings.
 
@@ -1156,12 +1170,39 @@ def scan_data_issues(data_dir: str, portfolio_name: str | None = None) -> ScanRe
                 suggested_fix="preview_ledger_replay",
             ))
 
-    # Security master
+    # Security master.
+    #
+    # A single `sector` is only meaningful for a single-company holding. A
+    # fund spans many sectors, and its real breakdown lives in
+    # fund_profiles as weights — stamping one label on VTI would be wrong,
+    # not missing. So funds are only flagged when that profile is absent
+    # too, and cash-like instruments are never flagged.
+    profiled = _sector_profiled_tickers(data_dir)
+    sectorless_ok = {"Cash", "CD", "Bond"}
+    fundish = {"ETF", "Fund"}
+
     for _, r in assets.iterrows():
-        missing = [c for c in ("name", "sector", "currency") if not str(r.get(c, "")).strip()]
+        ticker = str(r["ticker"])
+        atype = str(r.get("asset_type", ""))
+        missing = [c for c in ("name", "currency") if not str(r.get(c, "")).strip()]
+
+        if not str(r.get("sector", "")).strip():
+            if atype in fundish:
+                if ticker not in profiled:
+                    issues.append(Issue(
+                        severity="warning", domain="assets", key=ticker,
+                        detail=(
+                            "no sector breakdown — it is a fund with no profile in "
+                            "fund_profiles, so it can't be disaggregated for exposure."
+                        ),
+                        suggested_fix="invest-monitor collect fund-profile",
+                    ))
+            elif atype not in sectorless_ok:
+                missing.append("sector")
+
         if missing:
             issues.append(Issue(
-                severity="warning", domain="assets", key=str(r["ticker"]),
+                severity="warning", domain="assets", key=ticker,
                 detail=f"missing {', '.join(missing)}.",
                 suggested_fix="preview_asset_fix",
             ))

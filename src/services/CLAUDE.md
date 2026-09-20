@@ -38,6 +38,10 @@ src/services/
 ├── summaries.py       # list / get / delete / save_summary_from_session
 ├── trading_graph.py   # start_run / get_run_state / resume_run / end_run
 ├── datafix.py         # data correction: preview/apply gate, ledger replay, backups
+├── dashboard.py       # aggregate snapshot: totals, breakdowns, weekly value series
+├── exposure.py        # look-through by asset class + equity sector (fund profiles)
+├── risk.py            # trailing risk metrics + Monte Carlo projection
+├── income.py          # portfolio-wide income projection (delegates to reports.py)
 └── production.py      # list_jobs / get / set_enabled / run / run_due / list_runs / refresh_metrics
 ```
 
@@ -116,6 +120,31 @@ has no time dimension and a direct edit would leave the ledger disagreeing.
 `_replay_ledger` mirrors `Database._apply_trade_to_positions` exactly — if you
 change one, change both, or replays will silently rewrite correct data.
 
+## Aggregate screen endpoints
+
+`dashboard.py`, `exposure.py`, `risk.py` and `income.py` each back exactly
+one front-end screen and return everything it renders in a single call.
+That is deliberate: composing them client-side meant one price-history
+request per holding — dozens of round trips for a page load.
+
+They compose rather than duplicate. `exposure`, `risk` and `income` all
+call `dashboard.get_snapshot()` for priced holdings, and `income`
+delegates the rate arithmetic to `reports.income_projection` because the
+unit rules (dollars-per-share-per-payment for equities, annual percent for
+cash-like) are easy to invert without the number looking wrong.
+
+Two data realities they encode, both found against the live dataset:
+
+- **`daily_portfolio_metrics` is not a net-worth series.** Coverage is
+  ragged, so summing by date produces cliffs where an account has no row
+  (an apparent -81% drop in one session). `dashboard.py` values current
+  holdings at historical prices instead — a constant-holdings series, and
+  labelled as such everywhere it surfaces.
+- **Corrupted prices silently wreck risk.** A quote that collapses and
+  returns days later is a bad tick, not a return; leaving them in put the
+  fitted return at 35% a year. `risk.py` excludes moves that *round-trip*
+  rather than moves that are merely large, so genuine tail events survive.
+
 ## Long-running endpoints
 
 These are synchronous and can hold a worker for minutes — document any
@@ -133,8 +162,12 @@ A streaming / background-job version is planned in a later slice.
 
 Some logic deliberately doesn't live here yet:
 
-- **Monte Carlo wealth projection** lives in `src/agent/wealth_skills.py`
-  (~150 lines of stats). Migrates with the agent-skills refactor.
+- ~~Monte Carlo wealth projection~~ — **done.** `services.risk.
+  simulate_paths` is now the single simulation engine; the two hand-rolled
+  copies in `src/agent/wealth_skills.py` were replaced with calls to it and
+  the outputs verified byte-identical across eight cases, including
+  multi-phase scenarios with one-time shocks. `tests/services/test_risk.py`
+  fails if a hand-rolled `paths = np.zeros(...)` reappears.
 - **Single-fund profile fetch + fund-holdings CSV upload** — Streamlit
   still calls `Collector.fetch_fund_profile` and `Ingester` directly.
   Both are UI-only flows with no service surface today.

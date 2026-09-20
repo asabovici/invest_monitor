@@ -14,6 +14,7 @@ from scipy.optimize import minimize
 
 from src.agent.report_export import make_export_report_skill
 from src.database import Database
+from src.services.risk import simulate_paths
 from src.reporting import ReportingEngine
 from src.scenarios import SCENARIOS, CROSS_ASSET_BETAS
 
@@ -421,19 +422,14 @@ def create_wealth_skills(db: Database, engine: ReportingEngine) -> List:
         trading_days = int(years * 252)
         monthly_days = 21  # approx trading days per month
 
-        rng = np.random.default_rng(seed=42)
-        paths = np.zeros((num_simulations, trading_days + 1))
-        paths[:, 0] = current_value
-
-        contribution_per_period = monthly_contribution
-
-        for day in range(1, trading_days + 1):
-            daily_ret = rng.normal(daily_mu, daily_sigma, num_simulations)
-            paths[:, day] = paths[:, day - 1] * (1 + daily_ret)
-            if monthly_days > 0 and day % monthly_days == 0:
-                paths[:, day] += contribution_per_period
-
-        final_values = paths[:, -1]
+        # One simulation engine for the project — see services.risk.
+        final_values, _, _ = simulate_paths(
+            start_value=current_value,
+            num_simulations=num_simulations,
+            total_days=trading_days,
+            daily_params=lambda _day: (daily_mu, daily_sigma),
+            monthly_contribution=monthly_contribution,
+        )
         prob_success = float(np.mean(final_values >= goal_amount))
         total_contributions = monthly_contribution * years * 12
 
@@ -779,26 +775,28 @@ def create_wealth_skills(db: Database, engine: ReportingEngine) -> List:
         # Pre-compute per-day phase parameters for efficiency
         phase_starts = {start for start, _ in phase_schedule}
 
-        rng = np.random.default_rng(seed=42)
-        paths = np.zeros((num_simulations, trading_days + 1))
-        paths[:, 0] = current_value
+        def _params_for(day: int) -> tuple[float, float]:
+            phase = _get_phase(day)
+            return (
+                (base_daily_mu + beta_shock_daily) * phase.return_multiplier,
+                max(base_daily_sigma * phase.vol_multiplier, 1e-8),
+            )
 
-        for day in range(1, trading_days + 1):
-            phase = _get_phase(day - 1)
-            mu = (base_daily_mu + beta_shock_daily) * phase.return_multiplier
-            sigma = max(base_daily_sigma * phase.vol_multiplier, 1e-8)
-            daily_ret = rng.normal(mu, sigma, num_simulations)
-            paths[:, day] = paths[:, day - 1] * (1 + daily_ret)
+        def _shock_for(day: int) -> float:
+            # A phase's one-time shock lands on its first day.
+            phase = _get_phase(day)
+            return phase.one_time_shock if day in phase_starts else 0.0
 
-            # One-time shock on the first day of a new phase
-            if (day - 1) in phase_starts and phase.one_time_shock != 0.0:
-                paths[:, day] *= (1 + phase.one_time_shock)
-
-            # Monthly contributions
-            if monthly_days > 0 and day % monthly_days == 0:
-                paths[:, day] += monthly_contribution
-
-        final_values = paths[:, -1]
+        # Same engine as the plain projection; the scenario only supplies
+        # different per-day parameters.
+        final_values, _, _ = simulate_paths(
+            start_value=current_value,
+            num_simulations=num_simulations,
+            total_days=trading_days,
+            daily_params=_params_for,
+            monthly_contribution=monthly_contribution,
+            shock_for_day=_shock_for,
+        )
         prob_success = float(np.mean(final_values >= goal_amount)) if goal_amount > 0 else None
         total_contributions = monthly_contribution * years * 12
 

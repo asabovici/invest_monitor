@@ -16,6 +16,10 @@ src/api/
 ├── rate_limit.py        # Opt-in token-bucket rate limit (env-var-gated)
 ├── routers/             # One file per resource
 │   ├── agents.py
+│   ├── dashboard.py
+│   ├── exposure.py
+│   ├── income.py
+│   ├── risk.py
 │   ├── benchmarks.py
 │   ├── groups.py
 │   ├── portfolios.py
@@ -49,7 +53,27 @@ the authoritative list. High-level groupings:
 | `/summaries` | List, get, delete, `POST /from-session` |
 | `/trading-graph/runs` | Start / get / resume / end (HITL pause is a real REST step) |
 | `/production` | `/jobs`, `/jobs/{name}/run`, `/run-due`, `/runs`, `/metrics-refresh` |
+| `/dashboard` | Aggregate snapshot for the Dashboard + Holdings screens |
+| `/exposure` | Look-through by asset class and equity sector |
+| `/risk` | Trailing risk metrics + Monte Carlo projection (`?years=&goal_amount=&monthly_contribution=`) |
+| `/income` | Portfolio-wide income projection |
 | `/health` | Liveness probe |
+
+### Screen endpoints vs resource endpoints
+
+`/dashboard`, `/exposure`, `/risk` and `/income` are **screen-shaped**, not
+resource-shaped: each returns everything one front-end view renders, in one
+call. The alternative — composing from `/portfolios` + `/prices/history` —
+costs a request per holding, which is dozens per page load.
+
+They are additive. Nothing else was changed to accommodate them, and the
+resource endpoints remain the general-purpose surface.
+
+**Adding a screen endpoint means touching the frontend too:**
+`frontend/vite.config.ts` proxies an explicit list of router prefixes, and a
+prefix missing from that list falls through to Vite, so the view reports
+"the API isn't responding" with the server running fine. Keep the list in
+step with `app.include_router(...)` in `main.py`.
 
 ## Conventions
 

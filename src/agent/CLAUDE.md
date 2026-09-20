@@ -94,6 +94,25 @@ overwrite=False)` skill — Wealth / PM / CIO all get it via
 `make_export_report_skill(db, agent_kind=...)`. Files land in
 `<data_dir>/reports/`, sanitised filename, 1 MB cap.
 
+## The simulation engine lives in the service layer
+
+`wealth_skills.py` does **not** own its Monte Carlo. `run_goal_projection`
+and `run_scenario_analysis` both call `services.risk.simulate_paths`, which
+takes a per-day `(mu, sigma)` callback — that is what lets the scenario
+variant vary drift and volatility by phase, and apply one-time shocks,
+without a second copy of the maths.
+
+The per-day order inside it (draw → return → shock → contribution) and the
+single `rng.normal` call per day are load-bearing: they are what keep
+`seed=42` reproducible. Changing either silently changes every projection
+the agents produce.
+
+The dependency runs both ways at package level and always has:
+`services/agents.py` imports the agent classes to run chat sessions, and now
+`wealth_skills.py` imports `services.risk`. There is no cycle — `services.
+risk` pulls in nothing from `src/agent/` — but keep it that way: a service
+imported by a skill must stay agent-free, or the import graph closes.
+
 ## Gotchas
 
 - **Compare `AssetType` on `.value`, not the enum member.** Streamlit

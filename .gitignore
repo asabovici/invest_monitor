@@ -10,3 +10,5 @@ data*/reports/
 agent_summaries.json
 data*/.backups/
 audit_log.jsonl
+node_modules/
+frontend/dist/

@@ -6,39 +6,14 @@ modules and the layering ratchet.
 
 ## Layout
 
-```
-tests/
-├── services/                          # Pure-Python service-layer logic
-│   ├── test_agents.py
-│   ├── test_benchmarks.py
-│   ├── test_groups.py
-│   ├── test_portfolios.py
-│   ├── test_portfolios_mutations.py
-│   ├── test_prices.py
-│   ├── test_production.py
-│   ├── test_reports.py
-│   ├── test_scenarios.py
-│   ├── test_summaries.py
-│   ├── test_trades.py
-│   └── test_trading_graph.py
-├── api/                               # HTTP semantics via FastAPI TestClient
-│   ├── test_agents.py
-│   ├── test_benchmarks.py
-│   ├── test_groups.py
-│   ├── test_middleware.py
-│   ├── test_portfolios.py
-│   ├── test_portfolios_mutations.py
-│   ├── test_prices.py
-│   ├── test_production.py
-│   ├── test_reports.py
-│   ├── test_scenarios.py
-│   ├── test_trades.py
-│   └── test_trading_graph.py
-├── test_database.py                   # Database parquet store (pre-refactor)
-├── test_report_export.py              # Shared export_report skill
-├── test_lint_domain_layering.py       # Ratchet: caps direct domain refs in app/cli
-└── test_trading_graph_{state,routing,smoke}.py   # LangGraph stub-driven tests
-```
+`tests/services/` holds pure-Python service-layer logic and `tests/api/`
+covers HTTP semantics via the FastAPI `TestClient`; both mirror the module
+names in `src/services/`. Top-level files that don't follow that pattern:
+
+- `test_database.py` — the parquet store, pre-refactor
+- `test_report_export.py` — the shared `export_report` skill
+- `test_lint_domain_layering.py` — ratchet capping direct domain refs in app/cli
+- `test_trading_graph_{state,routing,smoke}.py` — LangGraph stub-driven tests
 
 ## Running
 
@@ -49,9 +24,8 @@ uv run pytest tests/api -q                  # HTTP layer only
 uv run pytest tests/services/test_reports.py::test_risk_metrics_has_realistic_values -v
 ```
 
-Current status: **252 passed, 3 pre-existing failures** in
-`tests/test_database.py` (unrelated to the API refactor; documented at
-the bottom).
+Three `tests/test_database.py` failures are pre-existing — see
+**Pre-existing failures** below before treating them as regressions.
 
 ## Fixtures + conventions
 

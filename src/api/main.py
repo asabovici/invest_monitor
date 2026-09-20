@@ -15,11 +15,15 @@ from src.api.rate_limit import RateLimitMiddleware
 from src.api.routers import (
     agents,
     benchmarks,
+    dashboard,
+    exposure,
     groups,
+    income,
     portfolios,
     prices,
     production,
     reports,
+    risk,
     scenarios,
     summaries,
     trades,
@@ -62,6 +66,10 @@ app.add_middleware(RateLimitMiddleware)
 app.add_middleware(APIKeyAuthMiddleware)
 register_error_handlers(app)
 
+app.include_router(dashboard.router)
+app.include_router(exposure.router)
+app.include_router(risk.router)
+app.include_router(income.router)
 app.include_router(portfolios.router)
 app.include_router(prices.router)
 app.include_router(reports.router)

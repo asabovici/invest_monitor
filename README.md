@@ -200,6 +200,34 @@ invest-monitor wealth --portfolio "My Portfolio"
 invest-monitor research --portfolio "My Portfolio" --query "Deploy $100k without increasing tech exposure"
 ```
 
+## Web front end (React)
+
+A ProjectionLab-styled SPA in `frontend/`, served by the FastAPI app. It runs
+**alongside** Streamlit — nothing was removed from the Streamlit dashboard.
+
+```bash
+uv run invest-monitor serve      # API on :8000
+cd frontend && npm install
+npm run dev                      # UI on :5173
+```
+
+Five screens, each backed by one aggregate endpoint so a page load is a
+single request:
+
+| Screen | Endpoint | Shows |
+|---|---|---|
+| Dashboard | `/dashboard` | Portfolio value over time, breakdowns by asset type and account, top holdings |
+| Holdings | `/dashboard` | Every position grouped by account or asset type, with filter |
+| Exposure | `/exposure` | Look-through: what your funds actually hold, by asset class and equity sector |
+| Risk | `/risk` | Chance of reaching a goal, Monte Carlo fan chart, trailing volatility / VaR / drawdown |
+| Income | `/income` | Projected annual and monthly income, by type, account and holding |
+
+Still Streamlit-only: agent chat, trade entry, position editing, the security
+master, look-through CSV upload, and production jobs.
+
+See `frontend/CLAUDE.md` for the conventions (theme tokens, palette
+validation, and the Vite proxy list that must track the API routers).
+
 ## Streamlit Dashboard
 
 ```bash
