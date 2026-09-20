@@ -214,3 +214,28 @@ export interface PerformanceReport {
 export const fetchPerformance = (
   dataDir?: string, portfolio?: string | null, start?: string | null,
 ) => get<PerformanceReport>(`/performance${qs({ portfolio, start })}`, dataDir)
+
+export interface AttributionContributor {
+  ticker: string
+  /** Decimal, summed over the window. */
+  contribution_to_return: number
+  /** Mean weight of the position over the window, as a fraction. */
+  average_weight: number
+}
+export interface AttributionReport {
+  portfolio_name: string
+  start_date: string
+  end_date: string
+  cumulative_return: number
+  max_drawdown: number
+  dates: string[]
+  daily_returns: (number | null)[]
+  top_contributors: AttributionContributor[]
+  top_detractors: AttributionContributor[]
+}
+
+export const fetchAttribution = (portfolio: string, dataDir?: string, topN = 10) =>
+  get<AttributionReport>(
+    `/reports/attribution/${encodeURIComponent(portfolio)}${qs({ top_n: topN })}`,
+    dataDir,
+  )
