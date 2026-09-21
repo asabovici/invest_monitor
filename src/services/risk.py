@@ -145,10 +145,23 @@ def _portfolio_returns(
     return pd.Series(aligned.values @ w, index=aligned.index), len(used), notes
 
 
+def _expected_shortfall(values: np.ndarray, percentile: float) -> float:
+    """Mean return among the days at or beyond the VaR cut.
+
+    VaR is a threshold and says nothing about how far past it the bad days
+    go; expected shortfall averages exactly those days. Falls back to the
+    cut itself when the tail is empty, which happens only on very short
+    histories where no observation sits at or below the percentile.
+    """
+    cut = float(np.percentile(values, percentile))
+    tail = values[values <= cut]
+    return float(tail.mean()) if tail.size else cut
+
+
 def _metrics(port: pd.Series) -> RiskMetrics:
     values = port.to_numpy()
     curve = (1 + port).cumprod()
-    drawdown = (curve / curve.cummax() - 1).min()
+    drawdowns = curve / curve.cummax() - 1
     sigma = float(values.std())
     return RiskMetrics(
         annualised_volatility=round(sigma * np.sqrt(_TRADING_DAYS), 6),
@@ -156,7 +169,13 @@ def _metrics(port: pd.Series) -> RiskMetrics:
         # Fitted-normal VaR: mean + z(0.05)·σ, the parametric counterpart to
         # the empirical figure above. They diverge when returns are fat-tailed.
         monte_carlo_var_95=round(float(values.mean() - 1.645 * sigma), 6),
-        max_drawdown=round(float(drawdown), 6),
+        historical_var_99=round(float(np.percentile(values, 1)), 6),
+        expected_shortfall_95=round(_expected_shortfall(values, 5), 6),
+        expected_shortfall_99=round(_expected_shortfall(values, 1), 6),
+        max_drawdown=round(float(drawdowns.min()), 6),
+        # Where the portfolio sits against its own peak today, which is a
+        # different question from how bad it ever got.
+        current_drawdown=round(float(drawdowns.iloc[-1]), 6),
         best_day=round(float(values.max()), 6),
         worst_day=round(float(values.min()), 6),
         observations=int(len(values)),

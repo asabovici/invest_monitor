@@ -126,7 +126,13 @@ export interface RiskMetrics {
   annualised_volatility: number
   historical_var_95: number
   monte_carlo_var_95: number
+  historical_var_99: number
+  /** Mean return among the worst 5% of days — the loss once VaR is breached. */
+  expected_shortfall_95: number
+  expected_shortfall_99: number
   max_drawdown: number
+  /** Fall from the running peak as at the last observation. */
+  current_drawdown: number
   best_day: number
   worst_day: number
   observations: number
@@ -161,12 +167,17 @@ export interface RiskReport {
 export const fetchRisk = (params: {
   dataDir?: string; years: number; goal?: number; monthly: number
   portfolio?: string | null
+  /** Omit to use the API default (2000). The Risk screen reads only the
+   *  measured metrics, so it asks for the minimum rather than paying for
+   *  paths it never draws. */
+  simulations?: number
 }) =>
   get<RiskReport>(
     `/risk${qs({
       years: params.years,
       monthly_contribution: params.monthly,
       goal_amount: params.goal || undefined,
+      num_simulations: params.simulations,
       portfolio: params.portfolio,
     })}`,
     params.dataDir,

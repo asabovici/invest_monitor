@@ -15,7 +15,23 @@ class RiskMetrics(BaseModel):
     monte_carlo_var_95: float = Field(
         description="5th-percentile daily return under a fitted normal, negative."
     )
+    historical_var_99: float = Field(
+        description="Worst 1st-percentile daily return, as a negative decimal."
+    )
+    expected_shortfall_95: float = Field(
+        description=(
+            "Mean daily return among the worst 5% of days, negative. VaR gives "
+            "the threshold; this gives the average loss once it is breached, so "
+            "it is the figure that moves when the tail is fat."
+        )
+    )
+    expected_shortfall_99: float = Field(
+        description="Mean daily return among the worst 1% of days, negative."
+    )
     max_drawdown: float = Field(description="Deepest peak-to-trough fall, negative.")
+    current_drawdown: float = Field(
+        description="Fall from the running peak as at the last observation, negative or 0."
+    )
     best_day: float
     worst_day: float
     observations: int = Field(description="Trading days of history behind these figures.")

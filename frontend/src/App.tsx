@@ -6,14 +6,16 @@ import { Exposure } from './views/Exposure'
 import { Holdings } from './views/Holdings'
 import { Income } from './views/Income'
 import { Performance } from './views/Performance'
+import { Projection } from './views/Projection'
 import { Risk } from './views/Risk'
 
 type View =
   | 'dashboard' | 'holdings' | 'performance' | 'attribution'
-  | 'exposure' | 'risk' | 'income'
+  | 'exposure' | 'risk' | 'projection' | 'income'
 
 const VIEWS: View[] = [
-  'dashboard', 'holdings', 'performance', 'attribution', 'exposure', 'risk', 'income',
+  'dashboard', 'holdings', 'performance', 'attribution', 'exposure', 'risk',
+  'projection', 'income',
 ]
 
 /** `null` means every portfolio — the default, and what the API serves when
@@ -76,6 +78,10 @@ const NAV: { id: View; label: string; icon: ReactNode }[] = [
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M12 3l9 16H3z" /><path d="M12 10v4M12 17h.01" />
     </svg>) },
+  { id: 'projection', label: 'Projection', icon: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M3 18c4-10 14-10 18 0" /><path d="M3 21h18" /><circle cx="21" cy="18" r="1.6" />
+    </svg>) },
   { id: 'income', label: 'Income', icon: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="12" cy="12" r="9" /><path d="M12 7v10M9.5 9.5h5M9.5 14.5h5" />
@@ -84,7 +90,8 @@ const NAV: { id: View; label: string; icon: ReactNode }[] = [
 
 const TITLES: Record<View, string> = {
   dashboard: 'Portfolio', holdings: 'Holdings', performance: 'Performance',
-  attribution: 'Attribution', exposure: 'Exposure', risk: 'Risk', income: 'Income',
+  attribution: 'Attribution', exposure: 'Exposure', risk: 'Risk',
+  projection: 'Projection', income: 'Income',
 }
 
 const AllIcon = (
@@ -190,6 +197,8 @@ export default function App() {
           <Exposure {...props} />
         ) : route.view === 'risk' ? (
           <Risk {...props} />
+        ) : route.view === 'projection' ? (
+          <Projection {...props} />
         ) : (
           <Income {...props} />
         )}

@@ -1,38 +1,22 @@
 import { useEffect, useState } from 'react'
 import { ApiError, fetchRisk, type RiskReport } from '../api'
 import { cssVar, pct, usd } from '../lib'
-import { FanChart } from '../components/FanChart'
 
-const R = 62, STROKE = 15, SIZE = 156
+/** The projection needs simulations; this screen doesn't read them, so it
+ *  asks for the endpoint's minimum rather than paying for 2,000 paths. */
+const MIN_SIMS = 100
 
-/** Ring gauge: one number, so a full donut with a legend would be noise. */
-function SuccessRing({ value }: { value: number }) {
-  const c = SIZE / 2
-  const circumference = 2 * Math.PI * R
-  const tone = value >= 0.85 ? '--pos' : value >= 0.6 ? '--c1' : '--neg'
+function Metric(
+  { label, value, tone, hint }:
+  { label: string; value: string; tone?: string; hint?: string },
+) {
   return (
-    <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} role="img"
-         aria-label={`Chance of success ${(value * 100).toFixed(1)} percent`}>
-      <circle cx={c} cy={c} r={R} fill="none" stroke={cssVar('--grid')} strokeWidth={STROKE} />
-      <circle cx={c} cy={c} r={R} fill="none" stroke={cssVar(tone)} strokeWidth={STROKE}
-              strokeLinecap="round" strokeDasharray={`${circumference * value} ${circumference}`}
-              transform={`rotate(-90 ${c} ${c})`} />
-      <text x={c} y={c - 1} textAnchor="middle" fontSize="27" fontWeight="700"
-            fill={cssVar('--ink')} style={{ fontVariantNumeric: 'tabular-nums' }}>
-        {(value * 100).toFixed(1)}%
-      </text>
-      <text x={c} y={c + 20} textAnchor="middle" fontSize="11" fill={cssVar('--ink-3')}>
-        chance of success
-      </text>
-    </svg>
+    <div className="metric">
+      <div className="k">{label}</div>
+      <div className="v num" style={tone ? { color: cssVar(tone) } : undefined}>{value}</div>
+      {hint && <div className="sub" style={{ marginTop: 2 }}>{hint}</div>}
+    </div>
   )
-}
-
-function verdict(p: number) {
-  if (p >= 0.9) return { word: 'strong', tone: '--pos', mark: '✓' }
-  if (p >= 0.75) return { word: 'good', tone: '--pos', mark: '✓' }
-  if (p >= 0.5) return { word: 'uncertain', tone: '--c1', mark: '!' }
-  return { word: 'unlikely', tone: '--neg', mark: '!' }
 }
 
 export function Risk(
@@ -40,18 +24,15 @@ export function Risk(
 ) {
   const [rep, setRep] = useState<RiskReport | null>(null)
   const [error, setError] = useState<ApiError | null>(null)
-  const [years, setYears] = useState(20)
-  const [goal, setGoal] = useState(3_000_000)
-  const [monthly, setMonthly] = useState(2000)
 
   useEffect(() => {
     let live = true
     setRep(null); setError(null)
-    fetchRisk({ dataDir, years, goal, monthly, portfolio })
+    fetchRisk({ dataDir, years: 1, monthly: 0, portfolio, simulations: MIN_SIMS })
       .then((d) => live && setRep(d))
       .catch((e) => live && setError(e instanceof ApiError ? e : new ApiError(0, String(e))))
     return () => { live = false }
-  }, [dataDir, portfolio, years, goal, monthly])
+  }, [dataDir, portfolio])
 
   if (error) {
     return (
@@ -65,111 +46,84 @@ export function Risk(
     )
   }
 
-  const p = rep?.projection
-  const v = p?.probability_of_success != null ? verdict(p.probability_of_success) : null
+  if (!rep) {
+    return (
+      <div className="stack" aria-busy="true" aria-label="Loading risk">
+        <div className="card skeleton" style={{ height: 180 }} />
+        <div className="card skeleton" style={{ height: 200 }} />
+      </div>
+    )
+  }
+
+  const m = rep.metrics
+  const dailyLoss = (r: number) => usd(Math.abs(r) * rep.market_value)
 
   return (
     <div className="stack">
       <section className="card hero">
-        {!rep || !p ? (
-          <div className="skeleton" style={{ height: 150 }} />
-        ) : (
-          <div className="statrow" style={{ alignItems: 'center' }}>
-            {p.probability_of_success != null && <SuccessRing value={p.probability_of_success} />}
-            <div style={{ flex: 1, minWidth: 240 }}>
-              {v && p.goal_amount != null && (
-                <div className="verdict">
-                  <span className="mark" style={{ background: cssVar(v.tone) }}>{v.mark}</span>
-                  <p style={{ margin: 0 }}>
-                    This chance of success looks <b style={{ color: cssVar(v.tone) }}>{v.word}</b>.
-                    Your portfolio finished at or above <b>{usd(p.goal_amount)}</b> in{' '}
-                    <b>{(p.probability_of_success! * 100).toFixed(0)}%</b> of{' '}
-                    <b>{p.num_simulations.toLocaleString('en-US')}</b> simulated runs over{' '}
-                    <b>{p.years} years</b>.
-                  </p>
-                </div>
-              )}
-              <div className="controls">
-                <div className="field">
-                  <label htmlFor="r-goal">Goal</label>
-                  <input id="r-goal" type="number" min={0} step={100000} value={goal}
-                         onChange={(e) => setGoal(Math.max(0, +e.target.value))} />
-                </div>
-                <div className="field">
-                  <label htmlFor="r-years">Years</label>
-                  <input id="r-years" type="number" min={1} max={60} value={years}
-                         onChange={(e) => setYears(Math.min(60, Math.max(1, +e.target.value)))} />
-                </div>
-                <div className="field">
-                  <label htmlFor="r-monthly">Monthly added</label>
-                  <input id="r-monthly" type="number" min={0} step={250} value={monthly}
-                         onChange={(e) => setMonthly(Math.max(0, +e.target.value))} />
-                </div>
-              </div>
+        <div className="statrow">
+          <div className="stat">
+            <div className="k">Annualised volatility</div>
+            <div className="v num">{(m.annualised_volatility * 100).toFixed(1)}%</div>
+          </div>
+          <div className="stat sm">
+            <div className="k">Max drawdown</div>
+            <div className="v num down">{pct(m.max_drawdown * 100)}</div>
+          </div>
+          <div className="stat sm">
+            <div className="k">Current drawdown</div>
+            <div className="v num" style={m.current_drawdown < 0 ? { color: cssVar('--neg') } : undefined}>
+              {pct(m.current_drawdown * 100)}
             </div>
           </div>
-        )}
+        </div>
+        <div className="note">
+          Measured on {rep.holdings_covered} of {rep.holdings_total} holdings with price
+          history, over {m.observations.toLocaleString('en-US')} trading days.
+        </div>
       </section>
 
       <section className="card pad">
-        <h2 className="h2">Projected value</h2>
-        {!rep || !p ? <div className="skeleton" style={{ height: 300 }} /> : (
-          <>
-            <FanChart bands={p.bands} goal={p.goal_amount} />
-            <div className="legend row">
-              <div className="lg" style={{ flex: 'none' }}>
-                <i className="dot" style={{ background: cssVar('--c4'), opacity: 0.24 }} />
-                <span className="nm">Middle 50%</span>
-              </div>
-              <div className="lg" style={{ flex: 'none' }}>
-                <i className="dot" style={{ background: cssVar('--c4'), opacity: 0.14 }} />
-                <span className="nm">5th–95th percentile</span>
-              </div>
-              <div className="lg" style={{ flex: 'none' }}>
-                <i className="dot" style={{ background: cssVar('--c4') }} />
-                <span className="nm">Median</span>
-              </div>
-            </div>
-            <div className="note" style={{ paddingTop: 10 }}>
-              Assumes normally distributed daily returns fitted to{' '}
-              {rep.metrics.observations.toLocaleString('en-US')} trading days —
-              {' '}{pct(p.assumed_annual_return * 100)} a year at{' '}
-              {(p.assumed_annual_volatility * 100).toFixed(1)}% volatility. Real returns are
-              fat-tailed, so treat the bands as a spread of plausible outcomes, not a
-              confidence interval.
-            </div>
-          </>
-        )}
+        <h2 className="h2">Tail risk</h2>
+        <div className="metricgrid">
+          <Metric label="Daily VaR (95%)" value={pct(m.historical_var_95 * 100)} tone="--neg"
+                  hint={`about ${dailyLoss(m.historical_var_95)}`} />
+          <Metric label="Expected shortfall (95%)" value={pct(m.expected_shortfall_95 * 100)} tone="--neg"
+                  hint={`about ${dailyLoss(m.expected_shortfall_95)}`} />
+          <Metric label="Daily VaR (99%)" value={pct(m.historical_var_99 * 100)} tone="--neg"
+                  hint={`about ${dailyLoss(m.historical_var_99)}`} />
+          <Metric label="Expected shortfall (99%)" value={pct(m.expected_shortfall_99 * 100)} tone="--neg"
+                  hint={`about ${dailyLoss(m.expected_shortfall_99)}`} />
+        </div>
+        {/* VaR is routinely misread as "the worst case". Saying what each
+            number does and doesn't cover is the whole job of this note. */}
+        <div className="note" style={{ paddingTop: 14 }}>
+          <b>Value at Risk</b> is the daily loss exceeded on 5% (or 1%) of days — a
+          threshold, not a worst case. <b>Expected shortfall</b> is the average loss on
+          the days that breach it, so it is the figure that grows when the tail is fat.
+          Both are measured from this portfolio’s own history, not modelled.
+        </div>
       </section>
 
       <section className="card pad">
-        <h2 className="h2">Trailing risk</h2>
-        {!rep ? <div className="skeleton" style={{ height: 90 }} /> : (
-          <>
-            <div className="metricgrid">
-              {([
-                ['Annualised volatility', pct(rep.metrics.annualised_volatility * 100).replace('+', ''), null],
-                ['Worst day', pct(rep.metrics.worst_day * 100), '--neg'],
-                ['Daily VaR (95%)', pct(rep.metrics.historical_var_95 * 100), '--neg'],
-                ['Max drawdown', pct(rep.metrics.max_drawdown * 100), '--neg'],
-              ] as const).map(([k, val, tone]) => (
-                <div className="metric" key={k}>
-                  <div className="k">{k}</div>
-                  <div className="v num" style={tone ? { color: cssVar(tone) } : undefined}>{val}</div>
-                </div>
-              ))}
-            </div>
-            <div className="note" style={{ paddingTop: 14 }}>
-              Measured on {rep.holdings_covered} of {rep.holdings_total} holdings that have price
-              history. Value at Risk is the daily loss exceeded 5% of the time.
-            </div>
-          </>
-        )}
+        <h2 className="h2">Daily extremes</h2>
+        <div className="metricgrid">
+          <Metric label="Best day" value={pct(m.best_day * 100)} tone="--pos" />
+          <Metric label="Worst day" value={pct(m.worst_day * 100)} tone="--neg" />
+          <Metric label="Fitted-normal VaR (95%)" value={pct(m.monte_carlo_var_95 * 100)}
+                  hint="parametric counterpart" />
+          <Metric label="Observations" value={m.observations.toLocaleString('en-US')} />
+        </div>
+        <div className="note" style={{ paddingTop: 14 }}>
+          The fitted-normal VaR assumes a bell curve. Where it is milder than the
+          historical figure above it, this portfolio’s losses are fatter-tailed than
+          a normal distribution allows for.
+        </div>
       </section>
 
-      {rep && rep.data_notes.length > 0 && (
+      {rep.data_notes.length > 0 && (
         <section className="card pad">
-          <h2 className="h2">Price data excluded from this fit</h2>
+          <h2 className="h2">Price data excluded from these figures</h2>
           <div className="barlist">
             {rep.data_notes.map((n) => <div className="sub" key={n}>{n}</div>)}
           </div>

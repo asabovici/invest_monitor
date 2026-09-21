@@ -260,3 +260,50 @@ class TestPortfolioScoping:
     def test_unknown_portfolio_is_not_found(self, data_dir):
         with pytest.raises(ValueError, match="not found"):
             risk.get_risk(data_dir, years=5, num_simulations=200, portfolio="No Such")
+
+
+class TestTailRiskMetrics:
+    """Expected shortfall and the 99% level.
+
+    VaR answers "how bad is a bad day at the 5% threshold"; it says nothing
+    about how bad the days beyond that threshold are. Expected shortfall —
+    the mean of the returns past the VaR cut — is the number that moves when
+    the tail is fat, and it is the one the Risk screen leads with.
+    """
+
+    def test_expected_shortfall_is_worse_than_var(self, data_dir):
+        """ES averages the losses beyond VaR, so it cannot be less severe."""
+        m = risk.get_risk(data_dir, years=5, num_simulations=200).metrics
+        assert m.expected_shortfall_95 <= m.historical_var_95
+        assert m.expected_shortfall_99 <= m.historical_var_99
+
+    def test_99_percent_level_is_worse_than_95(self, data_dir):
+        m = risk.get_risk(data_dir, years=5, num_simulations=200).metrics
+        assert m.historical_var_99 <= m.historical_var_95
+        assert m.expected_shortfall_99 <= m.expected_shortfall_95
+
+    def test_tail_metrics_are_negative(self, data_dir):
+        """A loss threshold that reads positive would be rendered as a gain."""
+        m = risk.get_risk(data_dir, years=5, num_simulations=200).metrics
+        assert m.historical_var_99 < 0
+        assert m.expected_shortfall_95 < 0
+        assert m.expected_shortfall_99 < 0
+
+    def test_current_drawdown_is_not_deeper_than_max(self, data_dir):
+        """Today's drawdown is a point on the curve whose worst point is max."""
+        m = risk.get_risk(data_dir, years=5, num_simulations=200).metrics
+        assert m.max_drawdown <= m.current_drawdown <= 0
+
+    def test_expected_shortfall_matches_the_tail_mean(self):
+        """Pin the definition against a hand-computed series."""
+        import numpy as np
+        import pandas as pd
+
+        # 100 returns: 0.01 … 1.00 scaled small, so the worst 5 are known.
+        values = np.linspace(-0.05, 0.05, 100)
+        port = pd.Series(values)
+        m = risk._metrics(port)
+
+        cut = float(np.percentile(values, 5))
+        expected = float(values[values <= cut].mean())
+        assert m.expected_shortfall_95 == pytest.approx(expected, abs=1e-6)
