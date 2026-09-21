@@ -8,14 +8,15 @@ import { Income } from './views/Income'
 import { Performance } from './views/Performance'
 import { Projection } from './views/Projection'
 import { Risk } from './views/Risk'
+import { Stress } from './views/Stress'
 
 type View =
   | 'dashboard' | 'holdings' | 'performance' | 'attribution'
-  | 'exposure' | 'risk' | 'projection' | 'income'
+  | 'exposure' | 'risk' | 'stress' | 'projection' | 'income'
 
 const VIEWS: View[] = [
   'dashboard', 'holdings', 'performance', 'attribution', 'exposure', 'risk',
-  'projection', 'income',
+  'stress', 'projection', 'income',
 ]
 
 /** `null` means every portfolio — the default, and what the API serves when
@@ -78,6 +79,10 @@ const NAV: { id: View; label: string; icon: ReactNode }[] = [
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M12 3l9 16H3z" /><path d="M12 10v4M12 17h.01" />
     </svg>) },
+  { id: 'stress', label: 'Stress test', icon: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M13 2L4 14h7l-1 8 9-12h-7z" />
+    </svg>) },
   { id: 'projection', label: 'Projection', icon: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <path d="M3 18c4-10 14-10 18 0" /><path d="M3 21h18" /><circle cx="21" cy="18" r="1.6" />
@@ -91,7 +96,7 @@ const NAV: { id: View; label: string; icon: ReactNode }[] = [
 const TITLES: Record<View, string> = {
   dashboard: 'Portfolio', holdings: 'Holdings', performance: 'Performance',
   attribution: 'Attribution', exposure: 'Exposure', risk: 'Risk',
-  projection: 'Projection', income: 'Income',
+  stress: 'Stress test', projection: 'Projection', income: 'Income',
 }
 
 const AllIcon = (
@@ -197,6 +202,8 @@ export default function App() {
           <Exposure {...props} />
         ) : route.view === 'risk' ? (
           <Risk {...props} />
+        ) : route.view === 'stress' ? (
+          <Stress {...props} />
         ) : route.view === 'projection' ? (
           <Projection {...props} />
         ) : (

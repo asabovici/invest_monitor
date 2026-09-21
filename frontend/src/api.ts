@@ -250,3 +250,69 @@ export const fetchAttribution = (portfolio: string, dataDir?: string, topN = 10)
     `/reports/attribution/${encodeURIComponent(portfolio)}${qs({ top_n: topN })}`,
     dataDir,
   )
+
+async function post<T>(path: string, body: unknown, dataDir?: string): Promise<T> {
+  let res: Response
+  try {
+    res = await fetch(path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(dataDir ? { 'X-Data-Dir': dataDir } : {}),
+      },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    throw new ApiError(0, 'Could not reach the API.')
+  }
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`
+    try {
+      const b = await res.json()
+      if (b?.detail) detail = String(b.detail)
+    } catch {
+      /* non-JSON error body — keep the status line */
+    }
+    throw new ApiError(res.status, detail)
+  }
+  return (await res.json()) as T
+}
+
+export interface StressScenarioInfo {
+  scenario_id: string
+  /** sector key → shock as a FRACTION (-0.55 = -55%). Unlike the row and
+   *  total figures below, which are percents. */
+  sector_shocks: Record<string, number>
+  non_equity_shocks: Record<string, number>
+}
+export interface StressShockRow {
+  ticker: string
+  asset_type: string
+  base_value: number
+  /** PERCENT, not a fraction — the API sends -10.0 for -10%. */
+  shock_pct: number
+  new_value: number
+  change_usd: number
+  /** How the shock was derived: a sector hit, a fund profile, a fallback. */
+  source: string
+}
+export interface StressTestResult {
+  portfolio_name: string
+  scenario_id: string | null
+  base_value: number
+  new_value: number
+  total_change_usd: number
+  /** PERCENT, like shock_pct. */
+  total_change_pct: number
+  rows: StressShockRow[]
+}
+
+export const fetchStressScenarios = (dataDir?: string) =>
+  get<StressScenarioInfo[]>('/scenarios/stress', dataDir)
+
+export const runStress = (portfolio: string, scenarioId: string, dataDir?: string) =>
+  post<StressTestResult>(
+    `/scenarios/stress/${encodeURIComponent(portfolio)}`,
+    { scenario_id: scenarioId },
+    dataDir,
+  )

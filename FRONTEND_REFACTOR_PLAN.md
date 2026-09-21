@@ -1060,6 +1060,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ### Task 4: Stress Test screen
 
+**Status: done.**
+
 **Files:**
 - Create: `frontend/src/views/Stress.tsx`
 - Modify: `frontend/src/api.ts`, `frontend/src/App.tsx`
@@ -1133,7 +1135,7 @@ export const runStress = (portfolio: string, scenarioId: string, dataDir?: strin
   )
 ```
 
-**Note the unit mismatch:** `StressShockRow.shock_pct` is a *percent* while `StressTestResult.total_change_pct` and the scenario `sector_shocks` are *fractions*. Do not put them through the same formatter. Verify against a live response before rendering — `curl -s -XPOST localhost:8000/scenarios/stress/SCHAB -H 'Content-Type: application/json' -d '{"scenario_id":"Mild Correction (-10%)"}' | head -c 400`.
+**Note the units** (verified against a live response — an earlier draft of this plan had this backwards): `StressShockRow.shock_pct` **and** `StressTestResult.total_change_pct` are *percents* (`-10.0`, `-6.083`), while the scenario `sector_shocks` / `non_equity_shocks` are *fractions* (`-0.55`). `pct()` in `lib.ts` takes a percent, so the first two pass straight through and only the shock catalogue needs `× 100`. Re-verify before rendering — `curl -s -XPOST localhost:8000/scenarios/stress/SCHAB -H 'Content-Type: application/json' -d '{"scenario_id":"Mild Correction (-10%)"}' | head -c 400`.
 
 - [ ] **Step 3: Build the view**
 
@@ -1280,6 +1282,21 @@ mixture of runs corrupts it the same way.
 had the identical defect through its own per-ticker `cum_return` and was
 fixed the same way. Corrected live figures: SCHAB +31.65%, PRU401K
 +60.93%, ESPP +41.27% — all coherent to 0.00e+00 drift.
+
+## Screen inventory changed: Risk split from Projection
+
+Not in the original plan. The Risk screen had become a wealth-projection
+screen — success ring, goal inputs and fan chart up top, four trailing
+metrics in a card near the bottom — while the Streamlit Risk tab kept
+measurement and projection apart.
+
+`views/Risk.tsx` now leads with measured tail risk and `views/Projection.tsx`
+owns the simulation. Both call `GET /risk`; Risk passes the endpoint's
+minimum `num_simulations` since it draws no paths.
+
+`expected_shortfall_95` / `_99`, `historical_var_99` and `current_drawdown`
+were added to `RiskMetrics` for it — expected shortfall was not computed
+anywhere before. Anything else consuming `RiskMetrics` gets them for free.
 
 ## Follow-ups on shipped screens
 
